@@ -25872,6 +25872,16 @@ mod rail_tests {
         size: egui::Vec2,
         events: Vec<egui::Event>,
     ) -> Vec<String> {
+        frame_in_viewport(app, ctx, size, events, None)
+    }
+
+    fn frame_in_viewport(
+        app: &mut App,
+        ctx: &egui::Context,
+        size: egui::Vec2,
+        events: Vec<egui::Event>,
+        fullscreen: Option<bool>,
+    ) -> Vec<String> {
         ctx.data_mut(|data| {
             data.remove::<egui::Rect>(rail::rect_id());
             data.remove::<egui::Rect>(crate::ui::chats::header_row_id());
@@ -25880,18 +25890,21 @@ mod rail_tests {
                 data.remove::<egui::Rect>(crate::ui::chats::compact_chat_id(&chat.id));
             }
         });
-        let mut output = ctx.run_ui(
-            egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
-                events,
-                ..Default::default()
-            },
-            |ui| {
-                let ctx = ui.ctx().clone();
-                app.background_frame(&ctx);
-                app.frame_ui(ui);
-            },
-        );
+        let mut input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            events,
+            ..Default::default()
+        };
+        input
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .unwrap()
+            .fullscreen = fullscreen;
+        let mut output = ctx.run_ui(input, |ui| {
+            let ctx = ui.ctx().clone();
+            app.background_frame(&ctx);
+            app.frame_ui(ui);
+        });
         output.textures_delta.clear();
         fn texts(shape: &egui::Shape, out: &mut Vec<String>) {
             match shape {
@@ -26173,6 +26186,166 @@ mod rail_tests {
             1
         );
         assert!(!drawn.iter().any(|text| text.starts_with("Details")));
+    }
+
+    fn deleted_control_rects(ctx: &egui::Context) -> Vec<Option<egui::Rect>> {
+        let mut rects = [
+            "Refresh saved messages".to_owned(),
+            "Group deleted by Chat".to_owned(),
+            "Group deleted by Sender".to_owned(),
+            "Back to deleted chats".to_owned(),
+            "Back to senders".to_owned(),
+            format!("Export deleted chat {}", SAMPLES[0].id),
+            format!("Export deleted chat {}", SAMPLES[1].id),
+        ]
+        .map(|label| {
+            focus::named_button(ctx, &label)
+                .and_then(|id| ctx.read_response(id))
+                .map(|response| response.rect)
+        })
+        .to_vec();
+        rects.push(
+            ctx.read_response(crate::ui::deleted::search_id())
+                .map(|response| response.rect),
+        );
+        rects
+    }
+
+    #[test]
+    fn deleted_headers_ignore_chat_sidebar_and_stored_info_at_both_breakpoints() {
+        for page in ["deleted-group", "deleted-sender"] {
+            for width in [619.0, 620.0, 699.0, 700.0] {
+                for show_thread in [false, true] {
+                    let (mut app, ctx) = open(page, true);
+                    let selection = crate::ui::deleted::selected_context_scope(&app);
+                    let mut original = None;
+                    for (sidebar, stored_info) in
+                        [(true, false), (false, false), (false, true), (true, true)]
+                    {
+                        app.sidebar_visible = sidebar;
+                        app.info = stored_info.then(|| InfoPanel {
+                            chat: SAMPLES[0].id.to_owned(),
+                            view: InfoView::Overview,
+                        });
+                        app.deleted_show_thread = show_thread;
+                        let mut drawn = Vec::new();
+                        for _ in 0..3 {
+                            drawn = frame_at(&mut app, &ctx, egui::vec2(width, 1000.0), Vec::new());
+                        }
+                        assert!(!crate::ui::macos_title_strip(&app, &ctx));
+                        assert_eq!(
+                            rail_rect(&ctx).map(|rect| rect.top()),
+                            (width >= 620.0).then_some(0.0),
+                            "{page}, {width}, sidebar={sidebar}, info={stored_info}"
+                        );
+                        assert!(list_header(&ctx).is_none());
+                        assert!(conversation_header(&ctx).is_none());
+                        assert!(!drawn.iter().any(|text| text == "Contact info"));
+                        assert_eq!(crate::ui::deleted::selected_context_scope(&app), selection);
+                        let rects = deleted_control_rects(&ctx);
+                        assert_eq!(
+                            rects.last().unwrap().is_some(),
+                            width >= 700.0 || !show_thread,
+                            "the Deleted list keeps its own 700-point breakpoint"
+                        );
+                        if let Some(original) = &original {
+                            assert_eq!(
+                                &rects, original,
+                                "{page}, {width}, thread={show_thread}, sidebar={sidebar}, info={stored_info}"
+                            );
+                        } else {
+                            original = Some(rects);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn deleted_headers_clear_traffic_lights_across_zoom_themes_and_fullscreen() {
+        for page in ["deleted-group", "deleted-sender"] {
+            for (appearance, zoom) in [("", 0.8), ("light", 1.0), ("theme=Nord.json", 1.25)] {
+                for width in [619.0, 620.0, 699.0, 700.0] {
+                    let mut app = app();
+                    apply_flags(&mut app, Some(&format!("{page},{appearance}")));
+                    app.settings.zoom = zoom;
+                    app.sidebar_visible = false;
+                    app.info = Some(InfoPanel {
+                        chat: SAMPLES[0].id.to_owned(),
+                        view: InfoView::Overview,
+                    });
+                    let ctx = egui::Context::default();
+                    app.attach(&ctx);
+                    crate::theme::preview_macos(&ctx);
+                    for fullscreen in [false, true] {
+                        for show_thread in [false, true] {
+                            app.deleted_show_thread = show_thread;
+                            for _ in 0..4 {
+                                frame_in_viewport(
+                                    &mut app,
+                                    &ctx,
+                                    egui::vec2(width, 1000.0),
+                                    Vec::new(),
+                                    Some(fullscreen),
+                                );
+                            }
+                            assert!((ctx.zoom_factor() - zoom).abs() < 0.001);
+                            assert!((ctx.content_rect().width() - width).abs() < 0.001);
+                            assert!(!crate::ui::macos_title_strip(&app, &ctx));
+                            assert_eq!(
+                                rail_rect(&ctx).map(|rect| rect.top()),
+                                (width >= 620.0).then_some(0.0)
+                            );
+                            let inset = crate::theme::traffic_light_inset(&ctx);
+                            assert_eq!(inset == 0.0, fullscreen);
+                            if fullscreen {
+                                continue;
+                            }
+                            let center =
+                                crate::ui::appkit_bar_height(crate::theme::TOP_BAR_HEIGHT, zoom)
+                                    / 2.0;
+                            let lights = egui::Rect::from_min_max(
+                                egui::pos2(0.0, center - 9.0 / zoom),
+                                egui::pos2(inset, center + 9.0 / zoom),
+                            );
+                            // Include buttons outside the rail's explicit Tab order,
+                            // such as Deleted's grouping and export controls.
+                            ctx.viewport(|viewport| {
+                                for (_, widgets) in viewport.prev_pass.widgets.layers() {
+                                    for widget in widgets.iter().filter(|widget| {
+                                        widget.enabled
+                                            && widget.visible
+                                            && widget.sense.senses_click()
+                                            // AppKit owns the traffic lights above this
+                                            // window-drag background; it is not a control.
+                                            && widget.id
+                                                != widget
+                                                    .parent_id
+                                                    .with("fastframe-titlebar-drag")
+                                            && widget.interact_rect.is_positive()
+                                            && widget.interact_rect.height() < 500.0
+                                            && widget.interact_rect.width() < width * 0.9
+                                    }) {
+                                        assert!(
+                                            !lights.intersects(widget.interact_rect.shrink(0.5)),
+                                            "{page}, {appearance}, width={width}, zoom={zoom}, thread={show_thread}: {:?} overlaps lights {lights:?}",
+                                            widget.interact_rect
+                                        );
+                                    }
+                                }
+                            });
+                            for rect in deleted_control_rects(&ctx).into_iter().flatten() {
+                                assert!(
+                                    rect.left() >= 0.0 && rect.right() <= width,
+                                    "{page}, {appearance}, width={width}, zoom={zoom}: {rect:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -26535,6 +26708,61 @@ mod rail_tests {
             );
             // Under Show the chat list, which takes a cell of its own.
             assert!(avatar.top() >= show.bottom());
+            if crate::theme::macos_chrome(&ctx) {
+                // Over the rail alone the lights get a strip of their own,
+                // and the rail and the open chat's header start under it.
+                assert!(crate::ui::macos_title_strip(&app, &ctx));
+                let strip = crate::ui::title_strip_height(&ctx);
+                assert_eq!(strip, 32.0);
+                assert_eq!(rail.top(), strip, "the rail starts under the strip");
+                let header = recorded(&ctx, crate::ui::conversation::header_rect_id())
+                    .expect("the open chat's header");
+                assert!(header.top() >= strip, "{header:?} starts under the strip");
+                // Nothing interactive under the lights, centred in the strip.
+                let lights = egui::Rect::from_min_max(
+                    egui::pos2(0.0, strip / 2.0 - 9.0),
+                    egui::pos2(84.0, strip / 2.0 + 9.0),
+                );
+                for (stop, id) in focus::stops(&ctx) {
+                    let response = ctx.read_response(id).unwrap();
+                    assert!(
+                        !response.rect.intersects(lights),
+                        "{stop:?} at {:?} is under the traffic lights",
+                        response.rect
+                    );
+                }
+            }
+        }
+    }
+
+    /// With the list shown, the lights sit in its header's row and there is
+    /// no strip; in full screen there are no lights and no strip either.
+    #[test]
+    fn the_macos_title_strip_appears_only_over_the_rail_alone() {
+        let (app, ctx) = open("chat", true);
+        assert!(!crate::ui::macos_title_strip(&app, &ctx));
+        assert_eq!(rail_rect(&ctx).unwrap().top(), 0.0);
+        // Over the rail alone there is a strip on macOS, and only there.
+        let (app, ctx) = open("rail", false);
+        let mac = crate::theme::macos_chrome(&ctx);
+        assert_eq!(crate::ui::macos_title_strip(&app, &ctx), mac);
+        let strip = if mac {
+            crate::ui::title_strip_height(&ctx)
+        } else {
+            0.0
+        };
+        assert_eq!(rail_rect(&ctx).unwrap().top(), strip);
+        // Whole points of room around the 14-point buttons at any zoom.
+        for zoom in [0.8_f32, 1.0, 1.1, 1.25, 1.5, 2.0] {
+            for bar in [32.0, crate::theme::TOP_BAR_HEIGHT] {
+                let height = crate::ui::appkit_bar_height(bar, zoom);
+                let room = (height * zoom - 14.0) / 2.0;
+                assert!(
+                    (room - room.round()).abs() < 1e-3,
+                    "{bar} at {zoom}: {room}"
+                );
+                assert!((height - bar).abs() * zoom <= 1.0 + 1e-3);
+            }
         }
     }
 
@@ -26600,7 +26828,12 @@ mod rail_tests {
                         let response = ctx.read_response(id).unwrap();
                         let mut viewport = rail_rect(&ctx).unwrap();
                         if crate::theme::traffic_light_inset(&ctx) > 0.0 {
-                            viewport.min.y += crate::theme::TOP_BAR_HEIGHT / 2.0 + 12.0;
+                            // Under the lights, whether they sit over the
+                            // rail or in the strip above it.
+                            viewport.min.y = viewport
+                                .min
+                                .y
+                                .max(crate::theme::TOP_BAR_HEIGHT / 2.0 + 12.0);
                         }
                         assert_eq!(
                             response.interact_rect, response.rect,

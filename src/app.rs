@@ -912,6 +912,9 @@ pub struct App {
     tray_allowed: bool,
     /// The tray item could not be made while the setting wants one.
     tray_failed: bool,
+    /// Dock clicks on macOS, which bring a closed window back with or without
+    /// a menu-bar item. `None` elsewhere, and in tests and demos.
+    dock: Option<fastframe_tray::Dock>,
     /// The unread level the tray icon shows (`util::tray_badge_level`).
     tray_badge: u32,
     /// A new window asks for the focus with its first frame.
@@ -1210,8 +1213,9 @@ fn wayland_session() -> bool {
     false
 }
 
-/// The app outlives its window: closing it with "keep running" on hides
-/// Wassup, and the tray, a notification or another launch brings it back.
+/// The app outlives its window: the Dock on macOS or an enabled, visible
+/// tray item keeps Wassup running. The Dock, tray, a notification or another
+/// launch brings the window back.
 impl fastframe_shell::Resident for App {
     fn closed(&self) -> fastframe_shell::Closed {
         if self.quit_requested {
@@ -1340,6 +1344,14 @@ fn wants_tray_item(allowed: bool, keep_running: bool, exists: bool) -> bool {
     allowed && keep_running && !exists
 }
 
+/// Whether closing the window keeps Wassup running. On macOS the Dock
+/// brings the window back, so closing it keeps Wassup running as other Mac
+/// apps do, and the setting decides only the menu-bar item. Elsewhere only a
+/// tray item a panel shows can bring it back.
+fn closing_keeps_running(dock: bool, tray_shown: bool, keep_running: bool) -> bool {
+    dock || (tray_shown && keep_running)
+}
+
 /// How often the panel's light or dark style is read again.
 const TRAY_COLOUR_EVERY: Duration = Duration::from_secs(3);
 
@@ -1438,6 +1450,10 @@ impl App {
         }
         app.tray_allowed = options.tray;
         app.spawn_tray_if_wanted();
+        if cfg!(target_os = "macos") && options.tray {
+            let dock_waker = waker.clone();
+            app.dock = Some(fastframe_tray::Dock::spawn(move || dock_waker.wake()));
+        }
         // The clock preference may wait on the desktop portal on Linux; keep
         // it off the first frame.
         std::thread::Builder::new()
@@ -1759,6 +1775,7 @@ impl App {
             tray: None,
             tray_allowed: false,
             tray_failed: false,
+            dock: None,
             tray_badge: 0,
             wants_focus: false,
             account_wheeled: None,
@@ -2202,9 +2219,13 @@ impl App {
         }
     }
 
-    /// Whether window close keeps the app in the tray.
-    pub fn hides_to_tray(&self) -> bool {
-        self.tray_shown() && self.settings.keep_running_in_background
+    /// Whether closing the window keeps Wassup running, hidden.
+    pub fn keeps_running_on_close(&self) -> bool {
+        closing_keeps_running(
+            self.dock.is_some(),
+            self.tray_shown(),
+            self.settings.keep_running_in_background,
+        )
     }
 
     /// Asks the compositor to bring the existing window forward, which niri
@@ -2257,10 +2278,19 @@ impl App {
 
     fn handle_tray(&mut self) {
         self.sync_tray();
+        let hidden = self.window_hidden;
+        // A Dock click on macOS only ever shows the window.
+        if let Some(dock) = &self.dock {
+            let events = dock.events();
+            self.actions.extend(
+                events
+                    .into_iter()
+                    .filter_map(|event| tray_action(event, hidden)),
+            );
+        }
         let Some(events) = self.tray.as_ref().map(fastframe_tray::Tray::events) else {
             return;
         };
-        let hidden = self.window_hidden;
         for event in events {
             let action = if TRAY_CLICK_TOGGLES && event == fastframe_tray::Event::Show {
                 self.tray_click(Instant::now())
@@ -2717,6 +2747,11 @@ impl App {
         // Ours hands the tray its own events (#215).
         #[cfg(target_os = "macos")]
         crate::macos::attach(ctx);
+        // The Dock first: on the first window the tray's item takes the
+        // Dock's clicks over, and both are read.
+        if let Some(dock) = &mut self.dock {
+            dock.attach();
+        }
         if let Some(tray) = &mut self.tray {
             tray.attach();
         }
@@ -3398,7 +3433,7 @@ impl App {
                 // not a query to match.
                 (self.locked_folder && !self.chat_lock_authenticated())
                     || needle.is_empty()
-                    || self.text_matches(&self.chat_title(chat), &needle)
+                    || self.name_matches(&self.chat_title(chat), &needle)
                     || chat.phone().is_some_and(|phone| phone.contains(&needle))
                     || chat
                         .last
@@ -3456,7 +3491,7 @@ impl App {
             .filter(|contact| {
                 contact
                     .display_name()
-                    .is_some_and(|name| self.text_matches(name, &needle))
+                    .is_some_and(|name| self.name_matches(name, &needle))
                     || contact
                         .id
                         .split('@')
@@ -5691,13 +5726,23 @@ impl App {
     /// Whether `text` holds `needle` once both are normalized, remembering
     /// the normalized form so the next frame does not pay for it again.
     fn text_matches(&self, text: &str, needle: &str) -> bool {
+        self.cached_key(text, |key| key.contains(needle))
+    }
+
+    /// Whether a name finds `needle` as the whole text or word by word (see
+    /// `util::search_matches`), sharing `text_matches`' cache.
+    fn name_matches(&self, name: &str, needle: &str) -> bool {
+        self.cached_key(name, |key| crate::util::search_matches(key, needle))
+    }
+
+    fn cached_key(&self, text: &str, hit: impl Fn(&str) -> bool) -> bool {
         if let Some(key) = self.search_keys.borrow().get(text) {
-            return key.contains(needle);
+            return hit(key.as_str());
         }
         let key = crate::util::search_key(text);
-        let hit = key.contains(needle);
+        let found = hit(key.as_str());
         self.search_keys.borrow_mut().insert(text.to_owned(), key);
-        hit
+        found
     }
 
     /// Asks the archive to be scanned for the chat list's search text.
@@ -7288,7 +7333,7 @@ impl App {
         // for a minimized window: closing one from the taskbar quit instead.
         if ctx.input(|input| input.viewport().close_requested())
             && !self.quit_requested
-            && self.hides_to_tray()
+            && self.keeps_running_on_close()
         {
             self.hide_intent = true;
         }
@@ -18976,12 +19021,12 @@ mod tests {
         let mut app = app();
         assert!(app.settings.keep_running_in_background);
         app.test_tray_shown = Some(false);
-        assert!(!app.hides_to_tray());
+        assert!(!app.keeps_running_on_close());
         app.apply(Action::HideWindow, &ctx);
         assert!(!app.hide_intent);
 
         app.test_tray_shown = Some(true);
-        assert!(app.hides_to_tray());
+        assert!(app.keeps_running_on_close());
         app.apply(Action::HideWindow, &ctx);
         assert!(app.hide_intent);
         app.hide_intent = false;
@@ -18989,8 +19034,49 @@ mod tests {
         assert!(app.hide_intent);
 
         app.settings.keep_running_in_background = false;
-        assert!(!app.hides_to_tray(), "the setting still decides");
+        assert!(!app.keeps_running_on_close(), "the setting still decides");
         assert!(!Resident::start_hidden(&mut app));
+    }
+
+    /// On macOS the Dock brings a closed window back, so closing it keeps
+    /// Wassup running with or without a menu-bar item, and the setting
+    /// decides only the item. A hidden start still needs the item: the
+    /// Dock's reopen handler needs a window made first.
+    #[test]
+    fn the_dock_keeps_a_closed_app_running_without_a_menu_bar_item() {
+        use fastframe_shell::{Closed, Resident};
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.dock = Some(fastframe_tray::Dock::spawn(|| {}));
+        app.settings.keep_running_in_background = false;
+        app.test_tray_shown = Some(false);
+        let mut input = egui::RawInput::default();
+        let info = input.viewports.entry(egui::ViewportId::ROOT).or_default();
+        info.events.push(egui::ViewportEvent::Close);
+        let mut output = ctx.run_ui(input, |ui| app.window_logic(ui.ctx()));
+        output.textures_delta.clear();
+        assert_eq!(app.closed(), Closed::Hide);
+
+        app.hide_intent = false;
+        assert!(
+            !Resident::start_hidden(&mut app),
+            "no item, no hidden start"
+        );
+        app.settings.keep_running_in_background = true;
+        assert!(app.keeps_running_on_close());
+        assert!(Resident::start_hidden(&mut app));
+
+        // A Dock Show event reopens the window even with the menu item off.
+        app.settings.keep_running_in_background = false;
+        app.window_gone();
+        let show = super::tray_action(fastframe_tray::Event::Show, true).unwrap();
+        app.apply(show, &ctx);
+        assert_eq!(app.headless_frame(&ctx), fastframe_shell::Headless::Show);
+
+        // Explicit Quit takes priority over both hidden and pending-show state.
+        app.apply(Action::Quit, &ctx);
+        assert_eq!(app.closed(), Closed::Quit);
+        assert_eq!(app.headless_frame(&ctx), fastframe_shell::Headless::Quit);
     }
 
     /// At login on GNOME the tray watcher comes up after Wassup (#429): a
@@ -26445,6 +26531,30 @@ mod tests {
         }
         assert_eq!(app.chats[0].name, "Ángel");
         app.search = "bob".into();
+        assert!(app.visible_chats().is_empty());
+        assert!(app.matching_contacts().is_empty());
+    }
+
+    #[test]
+    fn chat_and_contact_search_match_the_start_of_each_word() {
+        let mut app = app();
+        app.chats.push(Chat::new(
+            "1@s.whatsapp.net".into(),
+            "William Shakespeare".into(),
+        ));
+        let contact = Contact {
+            id: "2@s.whatsapp.net".into(),
+            full_name: Some("John Doe".into()),
+            first_name: None,
+            push_name: None,
+        };
+        app.contacts.insert(contact.id.clone(), contact);
+        app.search = "will shak".into();
+        assert_eq!(app.visible_chats().len(), 1);
+        app.search = "j d".into();
+        assert!(app.visible_chats().is_empty());
+        assert_eq!(app.matching_contacts().len(), 1);
+        app.search = "will x".into();
         assert!(app.visible_chats().is_empty());
         assert!(app.matching_contacts().is_empty());
     }

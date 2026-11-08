@@ -931,8 +931,214 @@ fn available_space(_: &Path) -> io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+    use whatsapp_rust::http::{HttpClient, HttpRequest, HttpResponse};
     use whatsapp_rust::prelude::MessageField;
+    use whatsapp_rust::wacore::net::StreamingHttpResponse;
     const KEY: [u8; 32] = [37; 32];
+
+    // Every response comes from memory. Building the bot does not start its
+    // transport; these fixtures never connect to WhatsApp or access a profile.
+    struct FixtureHttp {
+        body: Vec<u8>,
+        requests: Mutex<Vec<String>>,
+        reads: Arc<AtomicUsize>,
+        cancel_on_read: Option<Arc<AtomicBool>>,
+    }
+
+    struct FixtureBody {
+        bytes: Cursor<Vec<u8>>,
+        reads: Arc<AtomicUsize>,
+        cancel_on_read: Option<Arc<AtomicBool>>,
+    }
+
+    impl Read for FixtureBody {
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            if let Some(cancelled) = &self.cancel_on_read {
+                cancelled.store(true, Ordering::Release);
+            }
+            // Split cipher blocks across reads, including the authentication
+            // trailer, instead of handing the SDK one buffered response.
+            let count = bytes.len().min(113);
+            self.bytes.read(&mut bytes[..count])
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HttpClient for FixtureHttp {
+        async fn execute(&self, _: HttpRequest) -> Result<HttpResponse> {
+            panic!("bounded capture downloads must use the streaming HTTP path")
+        }
+
+        fn supports_streaming(&self) -> bool {
+            true
+        }
+
+        fn execute_streaming(&self, request: HttpRequest) -> Result<StreamingHttpResponse> {
+            self.requests.lock().unwrap().push(request.url);
+            Ok(StreamingHttpResponse::new(
+                200,
+                Box::new(FixtureBody {
+                    bytes: Cursor::new(self.body.clone()),
+                    reads: self.reads.clone(),
+                    cancel_on_read: self.cancel_on_read.clone(),
+                }),
+            ))
+        }
+    }
+
+    fn sdk_media_fixture(
+        plaintext: &[u8],
+        url: &str,
+        wrong_hash: bool,
+        cancel_on_read: Option<Arc<AtomicBool>>,
+    ) -> (MediaJob, Arc<FixtureHttp>) {
+        let encrypted = whatsapp_rust::wacore::upload::encrypt_media(
+            plaintext,
+            whatsapp_rust::wacore::download::MediaType::Image,
+        )
+        .unwrap();
+        let mut image = wa::message::ImageMessage::default();
+        image.static_url = Some(url.into());
+        image.mimetype = Some("image/png".into());
+        image.media_key = Some(encrypted.media_key.to_vec());
+        image.file_length = Some(plaintext.len() as u64);
+        image.file_sha256 = Some(if wrong_hash {
+            vec![0; 32]
+        } else {
+            encrypted.file_sha256.to_vec()
+        });
+        image.file_enc_sha256 = Some(encrypted.file_enc_sha256.to_vec());
+        let mut message = wa::Message::default();
+        message.image_message = MessageField::some(image);
+        (
+            MediaJob {
+                id: 1,
+                raw: message.encode_to_vec(),
+                attempts: 1,
+            },
+            Arc::new(FixtureHttp {
+                body: encrypted.data_to_upload,
+                requests: Mutex::new(Vec::new()),
+                reads: Arc::new(AtomicUsize::new(0)),
+                cancel_on_read,
+            }),
+        )
+    }
+
+    async fn fixture_bot(root: &Path, http: Arc<FixtureHttp>) -> whatsapp_rust::bot::Bot {
+        let store = whatsapp_rust::store::SqliteStore::open(
+            root.join("synthetic-session.db").to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        whatsapp_rust::prelude::Bot::builder()
+            .with_backend(store)
+            .with_http_client_arc(http)
+            .build()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn sdk_streamed_media_is_authenticated_encrypted_and_exportable() {
+        let root = tempfile::tempdir().unwrap();
+        let capture = Capture::open(&root.path().join("capture"), "stream-fixture").unwrap();
+        let plaintext = b"Synthetic streamed attachment. ".repeat(2048);
+        let url = "https://mmg.whatsapp.net/synthetic-fixture";
+        let (job, http) = sdk_media_fixture(&plaintext, url, false, None);
+        let bot = fixture_bot(root.path(), http.clone()).await;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let slots = Arc::new(Semaphore::new(1));
+        let result = download(
+            &capture,
+            &bot.client(),
+            &job,
+            cancelled.clone(),
+            slots.clone().acquire_owned().await.unwrap(),
+        )
+        .await;
+        let Outcome::Saved(relative) = result else {
+            panic!("valid streamed fixture was not published")
+        };
+        let saved = capture.root().join(relative);
+        let bytes = fs::read(&saved).unwrap();
+        assert!(!bytes.starts_with(b"SQLite format 3"));
+        assert!(!bytes.windows(30).any(|part| part == &plaintext[..30]));
+        let exported = root.path().join("explicit-export.png");
+        export_file(&capture, &saved, &exported).unwrap();
+        assert_eq!(fs::read(exported).unwrap(), plaintext);
+        assert!(http.reads.load(Ordering::Relaxed) > 1);
+        assert_eq!(*http.requests.lock().unwrap(), vec![url]);
+        // A restart after publish but before the job-status commit must reuse
+        // the verified ciphertext without requesting the attachment again.
+        assert!(matches!(
+            download(
+                &capture,
+                &bot.client(),
+                &job,
+                cancelled,
+                slots.acquire_owned().await.unwrap(),
+            )
+            .await,
+            Outcome::Saved(_)
+        ));
+        assert_eq!(http.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn sdk_media_hash_origin_and_cancellation_fail_without_publication() {
+        for (url, wrong_hash, cancel, expected_requests) in [
+            ("https://mmg.whatsapp.net/synthetic-fixture", true, false, 1),
+            (
+                "https://untrusted.invalid/synthetic-fixture",
+                false,
+                false,
+                0,
+            ),
+            ("https://mmg.whatsapp.net/synthetic-fixture", false, true, 1),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let capture = Capture::open(&root.path().join("capture"), "failure-fixture").unwrap();
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let (job, http) = sdk_media_fixture(
+                &b"Synthetic failed attachment. ".repeat(2048),
+                url,
+                wrong_hash,
+                cancel.then(|| cancelled.clone()),
+            );
+            let bot = fixture_bot(root.path(), http.clone()).await;
+            let result = download(
+                &capture,
+                &bot.client(),
+                &job,
+                cancelled,
+                Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap(),
+            )
+            .await;
+            assert!(if cancel {
+                matches!(result, Outcome::Paused(CANCELLED))
+            } else {
+                matches!(result, Outcome::Failed(_))
+            });
+            assert!(!capture.root().join("media/1.png").exists());
+            assert_eq!(http.requests.lock().unwrap().len(), expected_requests);
+            assert!(
+                fs::read_dir(capture.root().join("media"))
+                    .unwrap()
+                    .all(|entry| {
+                        !entry
+                            .unwrap()
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".wassup-encrypted-")
+                    })
+            );
+        }
+    }
 
     #[test]
     fn ordinary_media_is_queued_but_view_once_is_not() {

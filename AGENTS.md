@@ -1,8 +1,11 @@
 # Wassup private fork instructions
 
-This checkout is a private fork for the owner, based on upstream version 0.21.1. The
-owner explicitly authorizes receipt-time capture of their direct and group
-messages, sent-message revisions, and ordinary attachments into a separate
+This checkout is a private fork for the owner, based on upstream version 0.21.1,
+with selected runtime updates through `421d194`. Imported commits: `562a438`,
+`d51effb`, `d85f731`, `d58039c`, `2bab073`, `63f09e2`, and `421d194`. Keep
+excluded packaging, workflows, documentation site, and language additions out
+of future runtime updates. The owner explicitly authorizes receipt-time capture
+of their direct and group messages, sent-message revisions, and ordinary attachments into a separate
 local archive. That scope overrides the upstream prohibition on automated
 export below. It does not authorize bots, automatic replies, public hosting,
 or access to someone else's account.
@@ -586,10 +589,10 @@ protocol. These notes are for coding agents and new contributors.
   keep the guard's `fastsapp:` wire identity compatible with running old copies.
 - The app outlives the window, as in Spotifast: `main` hands the app to
   `fastframe_shell::Shell`, which runs `eframe::run_native` in a loop through
-  App's `Resident` impl; closing the window with "keep running"
-  on sets `hide_intent`, the window is destroyed, and a headless loop keeps
-  calling `App::background_frame` (the link, the archive, the tray) until
-  the tray, a clicked notification, or another launch sets `wants_show`,
+  App's `Resident` impl; closing the window on macOS, or with a visible
+  tray and "keep running" enabled elsewhere, sets `hide_intent`. The window is
+  destroyed, and a headless loop keeps calling `App::background_frame` (the link, the archive, the tray) until
+  the Dock, tray, a clicked notification, or another launch sets `wants_show`,
   when a new window is made. `Shell::run` marks its thread as the UI thread,
   where `fastframe_file::write` panics in debug: settings and the roster go
   through `App::files` (a `fastframe_file::Writer`) with `save_to`, flushed
@@ -603,7 +606,10 @@ protocol. These notes are for coding agents and new contributors.
   unread-chat count stays in Wassup and survives window replacement.
   Clicking the macOS menu-bar icon opens its menu; **Show or hide Wassup**
   toggles the window, and clicking the Dock icon shows it.
-  Closing keeps Wassup running only while `Tray::is_shown`: on Linux the
+  On macOS `fastframe_tray::Dock` keeps a closed app reachable without a
+  menu-bar item; the background setting controls only that item. Explicit Quit
+  still exits. Elsewhere closing keeps Wassup running only while
+  `Tray::is_shown` and the background setting is enabled: on Linux the
   item exists before a panel shows it (a start at login beats the panel, and
   GNOME's tray watcher) and registers once one appears. A hidden start with
   an item no panel shows yet waits `TRAY_WAIT` (30 s) for one in
@@ -622,8 +628,11 @@ protocol. These notes are for coding agents and new contributors.
   id, so the reader lands on the announced message. macOS has no title bar:
   the content runs to the top. `src/macos.rs` keeps native application menus alive across window
   recreation; `fastframe_titlebar::align_traffic_lights` centres the traffic
-  lights on the chat header. Linking retains
-  `ui::titlebar_strip`; other headers reserve horizontal space for the buttons.
+  lights on the chat header. Linking retains `ui::titlebar_strip`. Ordinary
+  chat layouts without a full sidebar use a compact strip when needed for
+  header controls. Deleted always keeps its own header clearance and 700-point
+  list/detail breakpoint, independent of the ordinary sidebar preference.
+  Fullscreen removes native traffic-light clearance.
   On Windows and Linux, Settings > Appearance > Custom title bar
   (`settings.custom_titlebar`, off by default for Intel drivers that
   mis-draw a frameless window, Spotifast #348/#554) draws fastframe-titlebar's

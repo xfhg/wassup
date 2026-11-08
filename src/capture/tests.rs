@@ -522,13 +522,26 @@ async fn sdk_hook_waits_for_durable_batch_and_returns_errors() {
         .info(Arc::new(info("second")))
         .build();
     capture
-        .on_messages(bot.client(), &[first.clone(), second])
+        .on_messages(bot.client(), &[first.clone(), second.clone()])
         .await
         .unwrap();
     assert_eq!(events(&capture).len(), 2);
-    // Replaying the whole committed batch is harmless.
-    capture.on_messages(bot.client(), &[first]).await.unwrap();
+    // Whole-batch redelivery and an overlapping batch after reconnect must
+    // retain the original rows once and still commit new rows in that batch.
+    capture
+        .on_messages(bot.client(), &[first.clone(), second.clone()])
+        .await
+        .unwrap();
     assert_eq!(events(&capture).len(), 2);
+    let third = InboundMessage::builder()
+        .message(Arc::new(text("third")))
+        .info(Arc::new(info("third")))
+        .build();
+    capture
+        .on_messages(bot.client(), &[second, third])
+        .await
+        .unwrap();
+    assert_eq!(events(&capture).len(), 3);
     capture
         .inner
         .connection
@@ -540,9 +553,28 @@ async fn sdk_hook_waits_for_durable_batch_and_returns_errors() {
         .message(Arc::new(text("not committed")))
         .info(Arc::new(info("failed")))
         .build();
-    assert!(capture.on_messages(bot.client(), &[failed]).await.is_err());
-    assert_eq!(events(&capture).len(), 2);
+    assert!(
+        capture
+            .on_messages(bot.client(), std::slice::from_ref(&failed))
+            .await
+            .is_err()
+    );
+    assert_eq!(events(&capture).len(), 3);
     assert!(capture.status().paused);
+    capture
+        .inner
+        .connection
+        .lock()
+        .unwrap()
+        .execute_batch("PRAGMA query_only=OFF")
+        .unwrap();
+    capture
+        .on_messages(bot.client(), &[first, failed.clone()])
+        .await
+        .unwrap();
+    capture.on_messages(bot.client(), &[failed]).await.unwrap();
+    assert_eq!(events(&capture).len(), 4);
+    assert!(!capture.status().paused);
 }
 
 #[test]

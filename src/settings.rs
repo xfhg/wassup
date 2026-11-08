@@ -476,7 +476,9 @@ pub struct Settings {
     pub reaction_emoji: Vec<(String, u32)>,
     /// User GIPHY API key. Empty uses the optional built-in key.
     pub giphy_key: String,
-    /// Keep the app linked in the tray when the window closes.
+    /// Keep the app linked in the tray when the window closes. On macOS,
+    /// where a closed Wassup always stays in the Dock, whether it has a
+    /// menu-bar item.
     pub keep_running_in_background: bool,
     /// Initial login registration succeeded, needs approval, or was explicitly disabled.
     pub login_registration_complete: bool,
