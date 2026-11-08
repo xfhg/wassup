@@ -2,7 +2,7 @@
 //! frame of a keyboard scenario. A screen reader speaks each change of that
 //! focus, so a frame that reports the window (the tree's root), or a key
 //! that moves focus twice (to a node and on, or away and straight back), is
-//! heard as "ZapFast window" or as an extra item, however briefly it lasts.
+//! heard as "Wassup window" or as an extra item, however briefly it lasts.
 
 use egui::accesskit::{NodeId, TreeUpdate};
 
@@ -971,7 +971,7 @@ fn mouse_clicks_keep_upstream_overlay_focus_with_accesskit_on() {
     );
 }
 
-/// A dialog open when ZapFast locks is there again after the unlock, as
+/// A dialog open when Wassup locks is there again after the unlock, as
 /// upstream keeps it, and takes focus again: the field behind it cannot,
 /// and the lock screen's field is gone.
 #[test]

@@ -13,7 +13,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         app,
         ui,
         "login",
-        &crate::i18n::gettext(app.locale, "A native WhatsApp client."),
+        &crate::i18n::gettext(app.locale, crate::branding::SHORT_DESCRIPTION),
         body,
     );
 }
@@ -67,8 +67,8 @@ pub(super) fn card(
                     let (logo, _) = ui.allocate_exact_size(Vec2::splat(64.0), egui::Sense::hover());
                     theme::mark(ui, logo.center(), 64.0);
                     ui.add_space(4.0);
-                    theme::text(ui, "ZapFast", theme::bold(28.0), palette.text);
-                    theme::text(ui, tagline, theme::regular(14.5), palette.secondary);
+                    theme::text(ui, "Wassup", theme::bold(28.0), palette.text);
+                    theme::paragraph(ui, tagline, theme::regular(14.5), palette.secondary);
                     ui.add_space(16.0);
                     body(app, ui);
                 });
@@ -334,8 +334,8 @@ mod start_over_tests {
             assert!(super::archive_key_lost(lost), "{lost}");
         }
         for recoverable in [
-            "Unlock your OS keyring and restart ZapFast",
-            "The OS keyring could not open ZapFast's archive key",
+            "Unlock your OS keyring and restart Wassup",
+            "The OS keyring could not open Wassup's archive key",
         ] {
             assert!(!super::archive_key_lost(recoverable), "{recoverable}");
         }

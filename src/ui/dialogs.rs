@@ -355,12 +355,12 @@ fn unlock_locked_chats(app: &mut App, ui: &mut egui::Ui) {
     let desc_text = if setup {
         crate::i18n::gettext(
             app.locale,
-            "Choose a local code to open the Locked tab. It is separate from your phone's code. This hides chats in ZapFast, it does not add another encryption layer.",
+            "Choose a local code to open the Locked tab. It is separate from your phone's code. This hides chats in Wassup, it does not add another encryption layer.",
         )
     } else {
         crate::i18n::gettext(
             app.locale,
-            "Enter your local ZapFast code. Leaving the Locked tab or closing the window locks it again.",
+            "Enter your local Wassup code. Leaving the Locked tab or closing the window locks it again.",
         )
     };
     theme::paragraph(ui, desc_text, theme::regular(13.0), palette.secondary);
@@ -446,7 +446,7 @@ fn confirm_lock_chat(app: &mut App, ui: &mut egui::Ui, id: &str) {
         ui,
         crate::i18n::gettext(
             app.locale,
-            "This moves the chat to the Locked tab, hiding it from the normal chat list, search, unread badges, and notifications. The lock status also syncs to your phone. Open Locked with a separate local ZapFast code to read it.",
+            "This moves the chat to the Locked tab, hiding it from the normal chat list, search, unread badges, and notifications. The lock status also syncs to your phone. Open Locked with a separate local Wassup code to read it.",
         ),
         theme::regular(13.0),
         palette.secondary,
@@ -1028,7 +1028,7 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
         let (logo, _) = ui.allocate_exact_size(egui::Vec2::splat(44.0), egui::Sense::hover());
         theme::mark(ui, logo.center(), 44.0);
         ui.vertical(|ui| {
-            theme::text(ui, "ZapFast", theme::bold(17.0), palette.text);
+            theme::text(ui, "Wassup", theme::bold(17.0), palette.text);
             let version_label = crate::i18n::gettext(app.locale, "Version {version}")
                 .replace("{version}", env!("CARGO_PKG_VERSION"));
             theme::text(ui, version_label, theme::regular(13.0), palette.secondary);
@@ -1037,10 +1037,7 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(6.0);
     theme::paragraph(
         ui,
-        crate::i18n::gettext(
-            app.locale,
-            "A native WhatsApp client written in Rust with egui. It connects through whatsapp-rust. Messages are end-to-end encrypted on this device.",
-        ),
+        crate::i18n::gettext(app.locale, crate::branding::DESCRIPTION),
         theme::regular(13.0),
         palette.text,
     );
@@ -1064,7 +1061,7 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
         .clicked()
         {
             app.actions
-                .push(Action::OpenUrl(env!("CARGO_PKG_REPOSITORY").to_owned()));
+                .push(Action::OpenUrl(crate::branding::SOURCE_URL.to_owned()));
         }
         theme::text(ui, "·", theme::regular(13.0), palette.dim);
         if theme::link(ui, "whatsapp-rust", theme::medium(13.0), palette.link).clicked() {
@@ -1443,7 +1440,7 @@ fn confirm_start_over(app: &mut App, ui: &mut egui::Ui) {
         &[
             &crate::i18n::gettext(
                 locale,
-                "ZapFast keeps your unreadable archive as a separate file, creates a new one, and asks you to link again. Linking again brings back recent history from your phone. Afterwards, remove the old ZapFast entry under Linked devices on your phone.",
+                "Wassup keeps your unreadable archive as a separate file, creates a new one, and asks you to link again. Linking again brings back recent history from your phone. Afterwards, remove the old Wassup entry under Linked devices on your phone.",
             ),
             &crate::i18n::gettext(
                 locale,

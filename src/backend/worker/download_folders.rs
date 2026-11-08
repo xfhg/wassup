@@ -64,7 +64,7 @@ fn real_directory(path: &Path) -> bool {
 /// The account's folder: its phone number, which stays the same whichever
 /// form (phone number or privacy id) WhatsApp names the account by, and which
 /// a different account linked in its place never shares. Only while the number
-/// is not known yet does the folder take the account's place in ZapFast.
+/// is not known yet does the folder take the account's place in Wassup.
 pub(super) fn account_folder(root: &Path, slot: &AccountId, phone: Option<&str>) -> PathBuf {
     let digits = phone
         .and_then(|phone| phone.split(['@', ':']).next())

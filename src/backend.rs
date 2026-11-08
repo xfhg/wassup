@@ -23,6 +23,7 @@ pub(crate) mod sticker_import;
 mod sticker_maker;
 pub(crate) mod sticker_store;
 mod worker;
+pub(crate) use worker::retained_original_is_visible;
 pub use worker::{PINNED_CHATS, PLUS_PINNED_CHATS, host_owned_presence};
 
 /// Result of a deletion request, without protocol errors crossing the bridge.
@@ -102,7 +103,7 @@ mod tests {
             pairing_phone: Some(phone.into()),
         };
 
-        // The previous Debug formatting leaked every field into zapfast.log.
+        // The previous Debug formatting leaked every field into wassup.log.
         let previous = format!("link: {status:?}");
         assert!(previous.contains(qr));
         assert!(previous.contains(code));
@@ -362,6 +363,11 @@ pub enum Command {
         message: String,
         starred: bool,
     },
+    /// Reads a bounded page of permanent originals removed from current chats.
+    LoadDeleted {
+        request: u64,
+        before: Option<i64>,
+    },
     /// Asks for the starred messages.
     LoadStarred,
     /// Result of a star or unstar request.
@@ -569,12 +575,12 @@ pub enum Command {
         complete: bool,
     },
     /// Internal: the one-time replay of the phone's contacts, for the first
-    /// names saved before ZapFast kept them, finished.
+    /// names saved before Wassup kept them, finished.
     FirstNamesRecovered {
         complete: bool,
     },
     /// Internal: the one-time replay of the phone's stars, for those made
-    /// before ZapFast followed them, finished.
+    /// before Wassup followed them, finished.
     StarsRecovered {
         complete: bool,
     },
@@ -987,7 +993,7 @@ pub enum Command {
     /// Sets aside an unreadable archive and the linked session, then starts
     /// over with a new archive and a new link.
     StartOverArchive,
-    /// Whether the person is looking at ZapFast. While they are not, the
+    /// Whether the person is looking at Wassup. While they are not, the
     /// linked phone keeps receiving push notifications.
     SetOnline(bool),
     Shutdown,
@@ -1068,6 +1074,7 @@ pub enum Command {
     },
     /// Internal uploaded attachment ready for archiving and sending.
     Outbound {
+        generation: u64,
         chat: ChatId,
         row: Box<Message>,
         raw: Vec<u8>,
@@ -1176,8 +1183,27 @@ pub enum Command {
     },
 }
 
+/// A permanent original with its current chat's removal classification.
+#[derive(Clone, Debug)]
+pub struct DeletedMessage {
+    pub sender_id: String,
+    pub saved: crate::capture::view::SavedMessage,
+    pub canonical_chat: String,
+    pub chat_name: String,
+    pub sender_name: String,
+    pub reason: String,
+}
+
 #[derive(Debug)]
 pub enum Event {
+    /// Health of the independent, permanent Wassup archive.
+    CaptureStatus(crate::capture::CaptureStatus),
+    DeletedLoaded {
+        request: u64,
+        messages: Vec<DeletedMessage>,
+        next_before: Option<i64>,
+        error: Option<String>,
+    },
     Blocklist {
         state: crate::blocking::Blocklist,
         error: Option<crate::blocking::Failure>,
@@ -1551,7 +1577,7 @@ pub enum Event {
     },
     /// The current call changed state. The UI renders this and nothing else.
     Call(Box<crate::calls::CallUpdate>),
-    /// A group call ZapFast cannot join while [`crate::calls::GROUP_CALLS_ENABLED`] is off:
+    /// A group call Wassup cannot join while [`crate::calls::GROUP_CALLS_ENABLED`] is off:
     /// ringing (`phase` is `Incoming`), so the window says who is calling and to answer on the
     /// phone, or over, so that word is taken back. It never takes the call screen.
     PhoneOnlyCall(Box<crate::calls::CallUpdate>),
@@ -1700,6 +1726,8 @@ pub enum ArchiveFailure {
 /// Why the worker refused a send.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
+    /// The permanent local copy could not be committed.
+    CaptureUnavailable,
     Blocked,
     /// There is no WhatsApp connection.
     Offline,
@@ -1764,14 +1792,14 @@ impl Backend {
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
-            .thread_name("zapfast-runtime")
+            .thread_name("wassup-runtime")
             .enable_all()
             .build()
             .expect("unable to start the async runtime");
         let worker_commands = command_tx.clone();
         let (startup, started) = tokio::sync::oneshot::channel();
         let thread = std::thread::Builder::new()
-            .name("zapfast-backend".to_string())
+            .name("wassup-backend".to_string())
             .spawn(move || {
                 runtime.block_on(async move {
                     if started.await.is_ok() {

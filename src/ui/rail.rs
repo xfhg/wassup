@@ -50,7 +50,7 @@ pub fn destination_id(destination: Destination) -> egui::Id {
 
 /// How far the macOS traffic lights reach past the rail: what a header
 /// beside the rail leaves free at its left. Zero elsewhere and in full
-/// screen. The caption buttons ZapFast draws on the left (GNOME) are not
+/// screen. The caption buttons Wassup draws on the left (GNOME) are not
 /// counted here: headers measure their room from `ui::caption_room`.
 pub fn lights_overhang(ctx: &egui::Context) -> f32 {
     if !theme::macos_chrome(ctx) {
@@ -64,6 +64,7 @@ pub fn lights_overhang(ctx: &egui::Context) -> f32 {
 pub enum Destination {
     Chats,
     Calls,
+    Deleted,
     Starred,
     Archived,
     Locked,
@@ -77,6 +78,7 @@ impl Destination {
         match self {
             Self::Chats => chats && !app.show_archived && !app.locked_folder_open(),
             Self::Calls => app.page == Page::Calls,
+            Self::Deleted => app.page == Page::Deleted,
             Self::Starred => app.page == Page::Chats && app.show_starred,
             Self::Archived => chats && app.show_archived,
             Self::Locked => chats && app.locked_folder_open(),
@@ -119,6 +121,11 @@ impl Destination {
             Self::Calls => {
                 if app.page != Page::Calls {
                     actions.push(Action::Open(Page::Calls));
+                }
+            }
+            Self::Deleted => {
+                if app.page != Page::Deleted {
+                    actions.push(Action::Open(Page::Deleted));
                 }
             }
             Self::Starred => {
@@ -169,7 +176,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, hidden: bool) {
         ui.spacing_mut().item_spacing.y = 0.0;
         let width = ui.available_width();
         if theme::traffic_light_inset(ui.ctx()) > 0.0 {
-            // The traffic lights, or the caption buttons ZapFast draws where
+            // The traffic lights, or the caption buttons Wassup draws where
             // the desktop puts them on the left (GNOME's round ones end 42
             // points down), take the rail's top; it starts under them.
             let (strip, _) = ui.allocate_exact_size(vec2(width, LIGHTS_CLEARANCE), Sense::hover());
@@ -187,7 +194,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, hidden: bool) {
         .filter(|destination| destination.offered(app))
         .collect();
         let foot = bottom.len() as f32 * (PLATE + GAP) + GAP + AVATAR + GAP;
-        let minimum = 2.0 * CELL
+        let minimum = 3.0 * CELL
             + foot
             + if hidden {
                 CELL + GAP + MIN_AVATARS
@@ -204,7 +211,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, hidden: bool) {
                 // the content keeps its minimum height and scrolls instead
                 // of leaving the bottom buttons beyond the window.
                 ui.set_height(height);
-                for destination in [Destination::Chats, Destination::Calls] {
+                for destination in [Destination::Chats, Destination::Calls, Destination::Deleted] {
                     destination_button(app, ui, &palette, destination, CELL);
                 }
                 if hidden {
@@ -302,6 +309,11 @@ fn destination_button(
                 gettext(app.locale, "Calls"),
                 super::keys::label("Ctrl+Shift+2")
             ),
+        ),
+        Destination::Deleted => (
+            Icon::Trash,
+            Stop::Deleted,
+            gettext(app.locale, "Deleted messages").into_owned(),
         ),
         Destination::Starred => (
             Icon::Star,
@@ -409,6 +421,7 @@ mod tests {
             [
                 Destination::Chats,
                 Destination::Calls,
+                Destination::Deleted,
                 Destination::Starred,
                 Destination::Archived,
                 Destination::Locked,
@@ -426,6 +439,8 @@ mod tests {
         assert_eq!(lit(&app), [Destination::Starred]);
         app.page = Page::Calls;
         assert_eq!(lit(&app), [Destination::Calls]);
+        app.page = Page::Deleted;
+        assert_eq!(lit(&app), [Destination::Deleted]);
         app.page = Page::Wallpaper;
         assert_eq!(lit(&app), [Destination::Settings]);
     }

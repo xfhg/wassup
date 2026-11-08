@@ -320,7 +320,7 @@ impl WallpaperColor {
     }
 }
 
-/// How long ZapFast may go without input before the app lock locks it:
+/// How long Wassup may go without input before the app lock locks it:
 /// WhatsApp Web's three choices.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -400,7 +400,7 @@ pub enum NotificationSound {
     System,
     /// No sound.
     None,
-    /// An audio file ZapFast plays itself.
+    /// An audio file Wassup plays itself.
     Custom(std::path::PathBuf),
 }
 
@@ -418,7 +418,7 @@ pub struct Settings {
     pub(crate) messages_theme: bool,
     /// The interface's typeface.
     pub font: FontChoice,
-    /// Windows and Linux: draw ZapFast's own title bar and window buttons
+    /// Windows and Linux: draw Wassup's own title bar and window buttons
     /// instead of the desktop's. Off by default: on some Intel graphics
     /// drivers a frameless window shows a black band at the top and its
     /// clicks land below where they are drawn (Spotifast #348, #554).
@@ -462,7 +462,7 @@ pub struct Settings {
     pub wallpaper_color: WallpaperColor,
     /// Colour selected for the dark wallpaper picker.
     pub dark_wallpaper_color: WallpaperColor,
-    /// ZapFast's own copy of the chosen wallpaper image, drawn in place of the
+    /// Wassup's own copy of the chosen wallpaper image, drawn in place of the
     /// colour and doodles in light and dark mode alike.
     pub wallpaper_image: Option<std::path::PathBuf>,
     /// Last open chat, restored at startup.
@@ -478,6 +478,8 @@ pub struct Settings {
     pub giphy_key: String,
     /// Keep the app linked in the tray when the window closes.
     pub keep_running_in_background: bool,
+    /// Initial login registration succeeded, needs approval, or was explicitly disabled.
+    pub login_registration_complete: bool,
     /// Desktop notifications while away from the chat.
     pub notifications: bool,
     /// Notifications name the chat and sender and show the message. Off,
@@ -529,7 +531,7 @@ pub struct Settings {
     /// Salted, slow verifier of the app lock password
     /// ([`crate::app_lock::verifier`]); `None` leaves the app lock off.
     pub app_lock_hash: Option<String>,
-    /// How long ZapFast may go unused before the app lock locks it.
+    /// How long Wassup may go unused before the app lock locks it.
     pub app_lock_after: AutoLock,
     /// Last window width in logical pixels (points at zoom 1), remembered
     /// across restarts; see [`fastframe_shell::window::Geometry`]. `None`
@@ -578,6 +580,7 @@ impl Default for Settings {
             reaction_emoji: Vec::new(),
             giphy_key: String::new(),
             keep_running_in_background: true,
+            login_registration_complete: false,
             notifications: true,
             notification_content: true,
             message_sound: NotificationSound::Receive,
@@ -586,7 +589,7 @@ impl Default for Settings {
             download_folder: None,
             keep_chats_archived: true,
             proxy: String::new(),
-            check_for_updates: true,
+            check_for_updates: false,
             download_updates_automatically: false,
             save_contacts_to_phone: true,
             voice_speed: 1.0,
@@ -1080,7 +1083,8 @@ mod tests {
             serde_json::from_str(r#"{"theme":"light","future_field":1}"#).expect("parses");
         assert_eq!(parsed.theme, ThemeChoice::Light);
         assert!(parsed.enter_sends);
-        assert!(parsed.check_for_updates);
+        assert!(!parsed.check_for_updates);
+        assert!(!parsed.login_registration_complete);
         assert!(!parsed.download_updates_automatically);
         assert!(parsed.show_wallpaper);
         assert_eq!(parsed.wallpaper_color, WallpaperColor::Theme);

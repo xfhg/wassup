@@ -46,7 +46,7 @@ impl Archive {
         ensure!(!known.locked, "Locked chats cannot be exported");
         let folder = target.parent().context("Choose an export folder")?;
         let mut transcript = tempfile::NamedTempFile::new_in(folder)?;
-        writeln!(transcript, "ZapFast chat export: {}", one_line(&known.name))?;
+        writeln!(transcript, "Wassup chat export: {}", one_line(&known.name))?;
         writeln!(
             transcript,
             "Times are UTC. Only locally saved messages are included."

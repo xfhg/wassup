@@ -183,7 +183,7 @@ fn leading_number(text: &str) -> Option<(u64, &str)> {
 /// [`crate::transport`] put in the error chain (`Failed to connect: {err:#}`).
 ///
 /// A fresh install must first fetch the WhatsApp Web version, so a device that
-/// cannot reach web.whatsapp.com stays at "Connecting" (crmne/zapfast#271).
+/// cannot reach web.whatsapp.com stays at "Connecting".
 fn connect_summary(lower: &str) -> Option<Cow<'static, str>> {
     if lower.contains("version fetch timed out") {
         return Some("timed out fetching the WhatsApp Web version".into());

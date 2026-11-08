@@ -1,24 +1,45 @@
-# ZapFast agent guide
+# Wassup private fork instructions
 
-ZapFast is a small native WhatsApp client: Rust, egui, and the
+This checkout is a private fork for the owner, based on upstream version 0.21.1. The
+owner explicitly authorizes receipt-time capture of their direct and group
+messages, sent-message revisions, and ordinary attachments into a separate
+local archive. That scope overrides the upstream prohibition on automated
+export below. It does not authorize bots, automatic replies, public hosting,
+or access to someone else's account.
+
+Keep Wassup's application identity, profile, Keychain entries, singleton, and
+login item separate from the upstream client. Do not adopt upstream profiles or credentials.
+Disable the upstream self-updater. This task targets the owner's Apple Silicon
+Mac; do not claim other-platform qualification without testing it.
+
+Work remains local. Do not commit, push, tag, publish releases, or open pull
+requests unless the owner explicitly requests it. Those instructions override
+the upstream release and branch workflow below. Preserve MIT attribution.
+Use synthetic fixtures; do not inspect existing private message databases.
+
+---
+
+# Wassup agent guide
+
+Wassup is a small native WhatsApp client: Rust, egui, and the
 [whatsapp-rust](https://github.com/oxidezap/whatsapp-rust) library for the
 protocol. These notes are for coding agents and new contributors.
 
 ## Product boundaries
 
 - Keep it a small native client. No browser engine, no telemetry, no
-  hosted backend, no ZapFast-operated account system. Features never send
+  hosted backend, no Wassup-operated account system. Features never send
   message content to a third party.
-- WhatsApp only. ZapFast is a client for WhatsApp accounts and will not
+- WhatsApp only. Wassup is a client for WhatsApp accounts and will not
   speak other networks or protocols (Matrix, Signal, Telegram, IRC, XMPP)
   or bridge to them.
-- No automation, ever. ZapFast is for a person reading and writing their
+- No automation, ever. Wassup is for a person reading and writing their
   own chats by hand. It will not have bots, an MCP server, or any API,
   command-line, plugin or scripting interface that reads, exports or sends
   messages for another program, nor scheduled, bulk or automatic replies.
   WhatsApp's terms forbid automated use, and it bans accounts for it, so such
   a feature would put every user's account at risk. Opening a chat from a
-  link or `zapfast <number>`, which only shows the chat to the person, is
+  link or `wassup <number>`, which only shows the chat to the person, is
   not automation.
 - Do not copy dependency source into this repository. For a dependency fix,
   use a fork under `github.com/crmne/` pinned to a commit and contribute the
@@ -28,12 +49,10 @@ protocol. These notes are for coding agents and new contributors.
   until a release includes the fix. The maintainer has explicitly approved
   pinned commits from `github.com/oxidezap/whatsapp-rust` once our carried
   fixes have merged upstream. Never point a dependency at any other fork
-  or source: `.github/scripts/check-dependency-sources.py` fails CI on one.
+  or source. Review manifest and lockfile changes against this policy.
 - Screenshots, captures, comparison pages and recordings made for a review
-  go in the pull request, never the repository:
-  `.github/scripts/check-review-evidence.py` fails CI on any file under
-  `docs/assets/`, or image or video elsewhere under `docs/`, that no page,
-  top-level file or packaging metadata uses.
+  go in the pull request or an external review artifact, never the repository.
+  Keep only media used by the application or its maintained documentation.
 - The protocol comes from whatsapp-rust. Do not reimplement pieces of it
   here, and do not advertise a capability merely because a protobuf field
   for it exists.
@@ -160,8 +179,8 @@ protocol. These notes are for coding agents and new contributors.
   Carousel cards retain independent images and local actions. Download commands
   carry an optional card index, and the archive stores each image path separately.
   The version-4 backfill preserves those paths when rebuilding derived content.
-  See [compatibility notes](docs/interactive-message-actions.md) for response
-  families, source references, and live-test limits.
+  Keep response-family compatibility and live-test limits explicit in changes.
+  Use the protocol types and existing fixtures as the implementation reference.
 - Calls use whatsapp-rust's `voip` feature (`Client::voip()`): signaling,
   keys, the relay transport and the codecs are the library's, never ours.
   `src/calls.rs` is one call's phase machine, fed only by the protocol's own
@@ -341,15 +360,13 @@ protocol. These notes are for coding agents and new contributors.
 - Chat ids are canonical strings: a chat behind a privacy id (`@lid`) is
   filed under its phone number once the mapping is known. Use
   `Worker::canonical` for anything that arrives as a `Jid`.
-- Updates come from fastframe-update: `src/updates.rs` holds ZapFast's
-  `UpdateConfig` (legacy `fastsapp` names, the publisher key) and the
-  proxy-aware client. It downloads verified GitHub releases and hands
-  installation to a helper after an explicit restart action. `main` calls
-  `fastframe_update::intercept` before anything else, so `--apply-update`,
-  `--update-receipt` and `--update-error` keep working with older releases'
-  helpers (`tests/update_flags.rs`). Portable releases carry
-  `packaging/zapfast-portable.txt`; the Windows installer has its own marker.
-- Custom themes come from fastframe-theme (`theme::Catalog`, ZapFast's
+- The private build disables the upstream self-updater. `src/updates.rs`
+  retains the update interface for compatibility, but does not fetch or install
+  public releases. Keep profile, signing, and application identities separate.
+  Package the private Mac build with `scripts/build-wassup-macos.sh`; do not
+  restore obsolete release, installer, or publishing workflows without an
+  explicit request from the owner.
+- Custom themes come from fastframe-theme (`theme::Catalog`, Wassup's
   `fastframe_theme::Palette` impl in `src/theme.rs`): it scans local JSON
   palettes off the UI thread, and the app caches the last usable choice in
   settings, with the palettes shared with Spotifast embedded as defaults. On Linux filesystem notifications reload the catalog and the active
@@ -583,22 +600,22 @@ protocol. These notes are for coding agents and new contributors.
   exists), and `src/macos.rs` hands its menu events to `fastframe_tray::claim_menu_event` first.
   The process Dock icon and unread badge use fastframe-dock; a Cargo run
   gets the embedded icon, while a packaged app keeps its bundle icon. The
-  unread-chat count stays in ZapFast and survives window replacement.
-  Clicking the macOS menu-bar icon opens its menu; **Show or hide ZapFast**
+  unread-chat count stays in Wassup and survives window replacement.
+  Clicking the macOS menu-bar icon opens its menu; **Show or hide Wassup**
   toggles the window, and clicking the Dock icon shows it.
-  Closing keeps ZapFast running only while `Tray::is_shown`: on Linux the
+  Closing keeps Wassup running only while `Tray::is_shown`: on Linux the
   item exists before a panel shows it (a start at login beats the panel, and
   GNOME's tray watcher) and registers once one appears. A hidden start with
   an item no panel shows yet waits `TRAY_WAIT` (30 s) for one in
   `App::check_tray_wait`, then shows the window (#429). A
   hidden start makes the macOS item with `Tray::create_item`, which does not
-  bring ZapFast forward; a window's `attach` makes it otherwise.
+  bring Wassup forward; a window's `attach` makes it otherwise.
   `src/single_instance.rs` claims fastframe-instance's slot in the runtime
   directory (`Slot::at(runtime, "fastsapp")`, so requests and replies stay
   `fastsapp:show` and `fastsapp:ok` for older copies), and a second launch
   asks the first to surface over a private socket (a token-checked loopback
   port on Windows); the handler queues `ControlCommand`s and declines unknown
-  verbs. The fixed port 47119 that 0.15-era copies look for stays in ZapFast,
+  verbs. The fixed port 47119 that 0.15-era copies look for stays in Wassup,
   answered once the slot is claimed. `src/notify.rs` sends desktop notifications
   for `Event::Incoming` (live messages from others, not history) when the
   reader is away from that chat; a click carries the chat and the message
@@ -730,59 +747,23 @@ branch is allowed only for an explicitly requested backport to an older
 supported line. Prefer fixing forward on `main`; do not create backport or
 release branches speculatively.
 
-## Releasing
+## Private Mac packaging
 
-Never use em dashes in user-facing writing, including release titles, release
-notes, and agent responses. Use commas, colons, parentheses, or full stops.
+Never use em dashes in user-facing writing, including agent responses. Use
+commas, colons, parentheses, or full stops.
 
-Before writing release notes, read the previous two stable releases of
-`../spotifast` and match their style: a short plain-language summary, `New`
-and `Fixed` sections with bold user-facing results, a `Thanks` section, and
-a full-changelog link. Credit who did what on the relevant item, with issue
-or PR numbers, and acknowledge reporters separately from implementers.
-Include screenshots or short videos of the main features, especially Omarchy
-theme integration when relevant. Capture only synthetic offline demo content,
-never real chats. Upload the media as assets of the GitHub release and link
-those URLs from the notes; never commit screenshots or recordings to the
-repository. Verify every media link and do not leave generated notes
-in place. Describe known limitations honestly.
+The owner uses an Apple Silicon Mac. Build and ad-hoc sign with
+`scripts/build-wassup-macos.sh`, which calls `packaging/macos/bundle.sh`.
+Keep the supplied icon artwork and licence attribution. A local build does
+not authorize a commit, push, tag, public release, or upload. Only the owner's
+explicit instruction authorizes those actions.
 
-Do not cut a release for every fix. Work accumulates on `main` until
-there is something substantial to announce: a feature, or a batch of
-fixes worth a changelog entry. Five patch releases in a day is what this
-rule exists to prevent. The exception is a regression in something just
-released, which goes out as soon as it is fixed.
-
-A release is not finished when the tag is pushed. Do these in order:
-
-1. From a clean, up-to-date `main`, bump `version` in `Cargo.toml`, add the
-   release to the `<releases>` list in the Flatpak metainfo, and update
-   `Cargo.lock` with a build. Write the release notes, in the style above, to
-   `packaging/release-notes/vX.Y.Z.md`: the release workflow publishes that
-   file as the release description, and a stable tag without it fails. Link
-   screenshots at the release's asset URLs
-   (`https://github.com/crmne/zapfast/releases/download/vX.Y.Z/NAME.png`).
-   Run the full checks, commit, and push `main`. Before tagging, verify the
-   release commit is reachable from `origin/main` so the binaries report the
-   right version and the release contains the canonical history.
-2. Tag `vX.Y.Z` and push the tag. Wait for every platform build, artifact,
-   and `checksums.txt`.
-3. Upload the screenshots to the release as assets with the names the notes
-   link, then open the published release and check the text, every image,
-   and every download link. Never leave generated placeholder notes.
-4. After the release files exist, update both `zapfast_version` in
-   `docs/_config.yml` and the version menu in `docs/_data/versions.yml`.
-   The menu lists only the current version, which points to `/download/`,
-   and the Changelog link; do not add older versions to it. Never point the
-   download page at files that do not exist yet. Set `release_asset_prefix` to
-   `zapfast` and `release_app_name` to `ZapFast` only once those assets exist.
-5. Update the AUR packages from the templates in `packaging/arch/`. The shared
-   packaging workflow generates versions, hashes and `.SRCINFO` after the
-   release exists, and publishes when `PUBLISH_AUR` and the required secrets
-   are configured. Otherwise use `native-packages` to build, stage,
-   review and publish the generated recipes; see `PACKAGING.md`. Validate
-   native builds with `makepkg -f`. A recipe-only `zapfast-git` change does
-   not require an application release.
+Use synthetic offline content for screenshots and validation, never real
+chats. Keep review captures outside the source tree. Verify package contents,
+application identity, and signature, and describe known limitations honestly.
+Prefer replacing the complete application bundle when installing. If copying
+into an existing bundle, refresh its modification time and force Launch
+Services registration before launch so macOS reloads the icon.
 
 ## Definition of done
 
@@ -790,8 +771,9 @@ A release is not finished when the tag is pushed. Do these in order:
   data and a headless layout test of every screen (`src/demo.rs`); extend
   the sample when a new kind of content or state is added, and use
   `--demo-shot` to look at the result.
-- Update the docs site (`docs/`) when user-visible behaviour, settings,
-  files, or network access changes. The README stays a short pointer to it.
+- Update the README or maintained project documentation when user-visible
+  behaviour, settings, files, or network access changes. Do not recreate the
+  removed upstream documentation site.
 - Run the full checks before finishing:
 
   ```sh

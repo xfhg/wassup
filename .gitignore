@@ -9,8 +9,30 @@
 
 /dist/
 
-/packaging/flatpak/built/
-/packaging/flatpak/cargo-sources.json
-/packaging/flatpak/flatpak-cargo-generator.py
-/.flatpak-builder/
-/build-dir/
+.DS_Store
+
+# Local credentials, runtime databases, exports, and app bundles.
+.env
+.env.*
+!.env.example
+!.env.sample
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+*.pem
+*.key
+*.p12
+*.pfx
+*.app/
+*.dmg
+*.pkg
+/wassup-config/
+/wassup-state/
+/wassup-cache/
+/wassup-run/
+/Wassup/
+/WhatsApp Archive/

@@ -1,6 +1,6 @@
 //! Call entries: the calls of a chat as messages of their own kind, which is
 //! how WhatsApp files them too. They come from the phone's call-log messages
-//! in history and from the call records ZapFast files (the phone's call log
+//! in history and from the call records Wassup files (the phone's call log
 //! and the calls it took part in, under ids that start with
 //! [`crate::model::CALL_ENTRY_PREFIX`]).
 
@@ -31,7 +31,7 @@ impl Archive {
         )
     }
 
-    /// ZapFast's own entries for a call the phone has now filed itself: the
+    /// Wassup's own entries for a call the phone has now filed itself: the
     /// same side's local entries around `timestamp`.
     pub fn local_call_twins(
         &self,

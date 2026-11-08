@@ -2,7 +2,7 @@
 //!
 //! WhatsApp stickers carry a small EXIF chunk whose single TIFF entry (tag
 //! 0x5741) holds JSON such as `{"sticker-pack-id": "…", "emojis": ["😂"]}`.
-//! WhatsApp reads those emojis to suggest stickers, and ZapFast reads them to
+//! WhatsApp reads those emojis to suggest stickers, and Wassup reads them to
 //! search stickers by emoji. Writing the same chunk keeps the association when
 //! a sticker made or imported here is sent.
 

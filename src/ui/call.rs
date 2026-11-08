@@ -69,7 +69,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 egui::Id::new(SURFACE).with("backdrop"),
                 egui::Sense::click_and_drag(),
             );
-            // Where ZapFast draws the title bar, the screen's top drags the
+            // Where Wassup draws the title bar, the screen's top drags the
             // window, beneath the corner's buttons.
             super::caption_drag(
                 ui,
@@ -299,7 +299,7 @@ fn corner_buttons(
         (palette.secondary, palette.text)
     };
     let corner = Rect::from_min_size(area.min, vec2(area.width(), 40.0));
-    // Clear of the caption buttons ZapFast draws over the window's corners.
+    // Clear of the caption buttons Wassup draws over the window's corners.
     let room = super::caption_room(ui.ctx(), corner, 120.0);
     let corner = Rect::from_min_max(
         egui::pos2(corner.left() + room.left, corner.top() + room.top),

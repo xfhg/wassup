@@ -8,7 +8,7 @@ use clap::Parser;
 
 /// A fast, native WhatsApp client.
 #[derive(Debug, Parser)]
-#[command(name = "zapfast", version, about)]
+#[command(name = "wassup", version, about)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Control>,
@@ -16,7 +16,7 @@ struct Cli {
     #[arg(short, long)]
     verbose: bool,
     /// Start in the tray without opening a window, when the tray is available
-    /// and ZapFast keeps running in the background. For login autostart.
+    /// and Wassup keeps running in the background. For login autostart.
     #[arg(long)]
     start_hidden: bool,
 
@@ -76,7 +76,7 @@ struct Cli {
     #[arg(long, requires = "demo")]
     demo_macos: bool,
 
-    /// Draw ZapFast's own title bar and window buttons, as Settings >
+    /// Draw Wassup's own title bar and window buttons, as Settings >
     /// Appearance > Custom title bar does, on Windows and Linux (demo only).
     #[cfg(feature = "demo")]
     #[arg(long, conflicts_with = "demo_macos")]
@@ -116,9 +116,9 @@ struct Cli {
 
 #[derive(Debug, clap::Subcommand)]
 enum Control {
-    /// Reload palettes in an already-running ZapFast without showing its window.
+    /// Reload palettes in an already-running Wassup without showing its window.
     ReloadThemes,
-    /// Quit an already-running ZapFast, which closing its window leaves in the tray.
+    /// Quit an already-running Wassup, which closing its window leaves in the tray.
     Quit,
 }
 
@@ -141,20 +141,20 @@ fn control(command: &Control, sent: single_instance::Sent) -> (i32, Option<Strin
         (_, Sent::Taken) | (Control::Quit, Sent::NotRunning) => (0, None),
         (Control::ReloadThemes, Sent::NotRunning) => (
             1,
-            Some("ZapFast is not running, so there are no themes to reload.".to_owned()),
+            Some("Wassup is not running, so there are no themes to reload.".to_owned()),
         ),
         (Control::ReloadThemes, Sent::Older) => (
             1,
-            Some("The running ZapFast is too old to reload themes from the command line.".to_owned()),
+            Some("The running Wassup is too old to reload themes from the command line.".to_owned()),
         ),
         (Control::Quit, Sent::Older) => (
             1,
             Some(
-                "The running ZapFast is too old to quit from the command line; use Quit in its tray menu."
+                "The running Wassup is too old to quit from the command line; use Quit in its tray menu."
                     .to_owned(),
             ),
         ),
-        (_, Sent::Failed(error)) => (1, Some(format!("Could not reach the running ZapFast: {error}"))),
+        (_, Sent::Failed(error)) => (1, Some(format!("Could not reach the running Wassup: {error}"))),
     }
 }
 
@@ -201,14 +201,11 @@ fn main() -> eframe::Result<()> {
 }
 
 fn run() -> eframe::Result<()> {
-    // First, before parsing the command line or touching any state: run the
-    // update helper when asked (`--apply-update <job>`, then exit), and take
-    // `--update-receipt` and `--update-error` off the command line.
-    let launch = fastframe_update::intercept(&zapfast::updates::CONFIG);
-    let cli = Cli::parse_from(&launch.arguments);
+    // This private build never executes an upstream update helper.
+    let cli = Cli::parse();
     let discovered = paths::AppDirs::discover();
     // A control command only talks to the running copy: whatever the answer,
-    // it never starts ZapFast and never stops a process itself.
+    // it never starts Wassup and never stops a process itself.
     if let Some(command) = &cli.command {
         let (code, message) = control(
             command,
@@ -236,7 +233,7 @@ fn run() -> eframe::Result<()> {
         && target.is_none()
         && invite.is_none()
     {
-        eprintln!("ZapFast cannot read a phone number or group invite link from {argument}");
+        eprintln!("Wassup cannot read a phone number or group invite link from {argument}");
         std::process::exit(2);
     }
     let waker = backend::Waker::default();
@@ -260,12 +257,12 @@ fn run() -> eframe::Result<()> {
             single_instance::Outcome::Surfaced
                 if cli.start_hidden && target.is_none() && invite.is_none() =>
             {
-                eprintln!("ZapFast is already running");
+                eprintln!("Wassup is already running");
                 return Ok(());
             }
             single_instance::Outcome::Surfaced => {
                 eprintln!(
-                    "ZapFast or FastsApp is already running; asked it to {}",
+                    "Wassup is already running; asked it to {}",
                     if target.is_some() {
                         "open the chat"
                     } else if invite.is_some() {
@@ -278,23 +275,22 @@ fn run() -> eframe::Result<()> {
             }
             single_instance::Outcome::Outdated => {
                 eprintln!(
-                    "ZapFast is already running, but that copy is too old to open the link; \
+                    "Wassup is already running, but that copy is too old to open the link; \
                      asked it to show its window instead. Quit it and try again to open the link."
                 );
                 return Ok(());
             }
             single_instance::Outcome::Unanswered => {
-                eprintln!("ZapFast is already running but did not answer");
+                eprintln!("Wassup is already running but did not answer");
                 return Ok(());
             }
         }
     };
     let default_filter = default_log_filter(cli.verbose);
-    // A demo must not create empty ZapFast directories that would prevent a
-    // later real launch from adopting the existing FastsApp session.
+    // Demo runs use isolated, disposable state and never touch a linked profile.
     let demo_root = demo.then(|| {
         std::env::temp_dir().join(format!(
-            "zapfast-demo-{}-{}",
+            "wassup-demo-{}-{}",
             std::process::id(),
             jiff::Timestamp::now().as_millisecond(),
         ))
@@ -305,15 +301,11 @@ fn run() -> eframe::Result<()> {
     };
     // A demo's folders are throwaway; remove them when the run returns.
     let _demo_root = demo_root.map(RemoveOnDrop);
-    if !demo {
-        dirs.adopt_previous_names()
-            .map_err(|error| eframe::Error::AppCreation(error.into()))?;
-    }
     // Do not open logs, settings, or either database unless their parent
     // directories have been created and secured successfully.
     dirs.ensure()
         .map_err(|error| eframe::Error::AppCreation(error.into()))?;
-    let logging = fastframe_log::Logging::new("zapfast", env!("CARGO_PKG_VERSION"))
+    let logging = fastframe_log::Logging::new("wassup", env!("CARGO_PKG_VERSION"))
         .filter(default_filter)
         .panic_log(dirs.panic_log())
         .redact(redact_protocol);
@@ -327,17 +319,12 @@ fn run() -> eframe::Result<()> {
     logging
         .init()
         .map_err(|error| eframe::Error::AppCreation(error.into()))?;
-    // Moving a single-account setup into its account folder needs the
-    // keyring; when it cannot finish, the log says why.
-    if !demo && let Err(error) = dirs.adopt_single_account() {
-        log::error!("could not move the linked account into its folder: {error}");
-        return Err(eframe::Error::AppCreation(error.into()));
-    }
-    // The name and icon volume mixers show for every sound ZapFast plays or records; set before
+    // Wassup starts with its own account layout and never adopts an older app's profile.
+    // The name and icon volume mixers show for every sound Wassup plays or records; set before
     // anything opens or lists a device.
     let _ = fastframe_audio::set_app_info(fastframe_audio::AppInfo {
-        name: "ZapFast".into(),
-        icon: Some("zapfast".into()),
+        name: "Wassup".into(),
+        icon: Some("wassup".into()),
     });
     let settings = settings::Settings::load(&dirs.settings_file());
     // The drawn title bar (Windows and Linux): GNOME's button layout and
@@ -365,9 +352,6 @@ fn run() -> eframe::Result<()> {
     };
     if cli.verbose {
         app.update_arguments.push("--verbose".into());
-    }
-    if let Some(error) = launch.error {
-        app.toast_error(error);
     }
     if let Some(guard) = &instance {
         app.set_remote_control(guard);
@@ -416,7 +400,6 @@ fn run() -> eframe::Result<()> {
         .demo_page
         .as_deref()
         .is_some_and(|page| page.split(',').any(|part| part.trim() == "phone-menu"));
-    let mut update_receipt = launch.receipt;
     // The link, archive, and tray outlive windows. The shell recreates a
     // window when the tray, a notification, or another launch requests one;
     // without a tray a hidden start shows the window (App::start_hidden).
@@ -426,13 +409,12 @@ fn run() -> eframe::Result<()> {
         cli.start_hidden,
         target.is_some() || invite.is_some(),
         demo,
-        update_receipt.is_some(),
+        false,
     );
     fastframe_shell::Shell::new(app, &waker)
         .start_hidden(start_hidden)
         .idle(fastframe_tray::idle)
         .run(|lease| {
-            let receipt = update_receipt.take();
             // The latest geometry lives in the app waiting in the shell, so
             // a reopened window (tray, notification, Wayland reopen) uses
             // what the last one remembered, not what the process started
@@ -468,7 +450,7 @@ fn run() -> eframe::Result<()> {
                 )
             });
             eframe::run_native(
-                "ZapFast",
+                "Wassup",
                 native_options(demo_persistence.clone(), geometry, transparent),
                 Box::new(move |cc| {
                     let mut app = lease.take(&cc.egui_ctx);
@@ -493,7 +475,6 @@ fn run() -> eframe::Result<()> {
                         window_recovery_checked: false,
                         stalls: Default::default(),
                         transparent,
-                        update_receipt: receipt,
                         #[cfg(target_os = "windows")]
                         taskbar: Default::default(),
                         #[cfg(feature = "demo")]
@@ -523,19 +504,19 @@ fn is_graphics_failure(error: &eframe::Error) -> bool {
     )
 }
 
-/// The text of the dialog shown when ZapFast cannot start, kept apart from
+/// The text of the dialog shown when Wassup cannot start, kept apart from
 /// the dialog so it is tested on every platform.
 #[cfg(any(windows, test))]
 fn startup_failure_text(graphics: bool, details: &str, log: &std::path::Path) -> String {
     let summary = if graphics {
-        "ZapFast could not start because the graphics driver does not offer \
-         OpenGL 2.1 or newer, which ZapFast needs to draw its window.\n\n\
+        "Wassup could not start because the graphics driver does not offer \
+         OpenGL 2.1 or newer, which Wassup needs to draw its window.\n\n\
          Install the current driver from the maker of the graphics chip \
          (Intel, AMD or NVIDIA). The Microsoft Basic Display Adapter, some \
          virtual machines and some remote desktop sessions offer no usable \
          OpenGL."
     } else {
-        "ZapFast could not start."
+        "Wassup could not start."
     };
     format!(
         "{summary}\n\nDetails: {details}\n\nThe log may say more: {}",
@@ -558,7 +539,7 @@ fn startup_failure_dialog(error: &eframe::Error) {
         &paths::AppDirs::discover().log_file(),
     );
     let wide = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<u16>>();
-    let (text, caption) = (wide(&text), wide("ZapFast"));
+    let (text, caption) = (wide(&text), wide("Wassup"));
     // SAFETY: both strings are NUL-terminated and outlive the call.
     unsafe {
         MessageBoxW(
@@ -614,11 +595,11 @@ fn native_options(
     let default_size = demo_size_arg().unwrap_or([1180.0, 780.0]);
     let demo = demo_persistence.is_some();
     let viewport = egui::ViewportBuilder::default()
-        .with_title(if demo { "ZapFast Demo" } else { "ZapFast" })
+        .with_title(if demo { "Wassup Demo" } else { "Wassup" })
         .with_app_id(if demo {
-            "zapfast-demo".to_owned()
+            "wassup-demo".to_owned()
         } else {
-            fastframe_desktop::desktop_entry("zapfast")
+            fastframe_desktop::desktop_entry("wassup")
         });
     // The remembered size and position, from the settings, over the default
     // size. Demo runs keep their fixed screenshot size.
@@ -641,7 +622,7 @@ fn native_options(
         .with_transparent(transparent)
         .with_titlebar_shown(false)
         .with_title_shown(false)
-        // Windows and Linux: no frame when ZapFast draws its own title bar.
+        // Windows and Linux: no frame when Wassup draws its own title bar.
         // Fixed for the window's life; a new choice replaces the window.
         .with_decorations(!fastframe_titlebar::enabled());
     eframe::NativeOptions {
@@ -665,7 +646,6 @@ struct Shell {
     stalls: fastframe_shell::StallWatch,
     /// Whether this window was made transparent, for the Messages theme.
     transparent: bool,
-    update_receipt: Option<fastframe_update::Receipt>,
     app: fastframe_shell::Held<app::App>,
     /// This window's unread overlay on its taskbar button.
     #[cfg(target_os = "windows")]
@@ -838,20 +818,8 @@ impl Shell {
             .iter_mut()
             .filter_map(|account| account.backend.take_startup())
             .collect();
-        if let Some(receipt) = self.update_receipt.take() {
-            std::thread::spawn(move || {
-                if let Err(error) = receipt.acknowledge() {
-                    log::warn!("could not acknowledge the update: {error:#}");
-                    return;
-                }
-                for startup in startups {
-                    let _ = startup.send(());
-                }
-            });
-        } else {
-            for startup in startups {
-                let _ = startup.send(());
-            }
+        for startup in startups {
+            let _ = startup.send(());
         }
         #[cfg(feature = "demo")]
         match self.tour.as_mut() {
@@ -894,7 +862,7 @@ mod target_cli_tests {
             "https://wa.me/20123456789",
             "+20123456789",
         ] {
-            let cli = Cli::try_parse_from(["zapfast", argument]).unwrap();
+            let cli = Cli::try_parse_from(["wassup", argument]).unwrap();
             let request = zapfast::target::parse(cli.target.as_deref().unwrap()).unwrap();
             assert_eq!(request.chat, "20123456789@s.whatsapp.net", "{argument}");
             assert_eq!(request.text, None, "{argument}");
@@ -909,7 +877,7 @@ mod target_cli_tests {
             "whatsapp://chat/?code=KqTP1zA4tFJLolS2usUzpA",
             "whatsapp://chat?code=KqTP1zA4tFJLolS2usUzpA",
         ] {
-            let cli = Cli::try_parse_from(["zapfast", argument]).unwrap();
+            let cli = Cli::try_parse_from(["wassup", argument]).unwrap();
             assert_eq!(
                 cli.target
                     .as_deref()
@@ -925,7 +893,7 @@ mod target_cli_tests {
     #[test]
     fn a_target_argument_carries_its_template() {
         let cli = Cli::try_parse_from([
-            "zapfast",
+            "wassup",
             "whatsapp://send?phone=20123456789&text=Hi%20there",
         ])
         .unwrap();
@@ -946,13 +914,13 @@ mod target_cli_tests {
     #[test]
     fn the_subcommand_and_the_target_stay_apart() {
         assert!(matches!(
-            Cli::try_parse_from(["zapfast", "reload-themes"])
+            Cli::try_parse_from(["wassup", "reload-themes"])
                 .unwrap()
                 .command,
             Some(Control::ReloadThemes)
         ));
-        assert!(Cli::try_parse_from(["zapfast", "reload-themes", "20123456789"]).is_err());
-        let cli = Cli::try_parse_from(["zapfast", "wa.me/20123456789"]).unwrap();
+        assert!(Cli::try_parse_from(["wassup", "reload-themes", "20123456789"]).is_err());
+        let cli = Cli::try_parse_from(["wassup", "wa.me/20123456789"]).unwrap();
         assert!(cli.command.is_none());
         assert_eq!(cli.target.as_deref(), Some("wa.me/20123456789"));
     }
@@ -960,11 +928,11 @@ mod target_cli_tests {
     /// `quit` is the subcommand, not a chat to open, and takes no chat.
     #[test]
     fn quit_is_a_subcommand() {
-        let cli = Cli::try_parse_from(["zapfast", "quit"]).unwrap();
+        let cli = Cli::try_parse_from(["wassup", "quit"]).unwrap();
         assert!(matches!(cli.command, Some(Control::Quit)));
         assert!(cli.target.is_none());
         assert_eq!(Control::Quit.verb(), "quit");
-        assert!(Cli::try_parse_from(["zapfast", "quit", "20123456789"]).is_err());
+        assert!(Cli::try_parse_from(["wassup", "quit", "20123456789"]).is_err());
     }
 
     /// Quitting succeeds when the running copy takes it and, quietly, when
@@ -987,9 +955,9 @@ mod target_cli_tests {
     /// A launch with nothing to open still works: the target is optional.
     #[test]
     fn a_launch_without_a_target_still_parses() {
-        let cli = Cli::try_parse_from(["zapfast"]).unwrap();
+        let cli = Cli::try_parse_from(["wassup"]).unwrap();
         assert!(cli.target.is_none());
-        let cli = Cli::try_parse_from(["zapfast", "--start-hidden"]).unwrap();
+        let cli = Cli::try_parse_from(["wassup", "--start-hidden"]).unwrap();
         assert!(cli.start_hidden);
         assert!(cli.target.is_none());
     }
@@ -1021,25 +989,25 @@ mod tests {
 
     #[test]
     fn tour_cli_accepts_manual_and_delayed_starts() {
-        let cli = Cli::try_parse_from(["zapfast", "--demo-tour"]).unwrap();
+        let cli = Cli::try_parse_from(["wassup", "--demo-tour"]).unwrap();
         assert!(cli.demo_tour);
         assert!(cli.demo_tour_delay.is_none());
         let cli =
-            Cli::try_parse_from(["zapfast", "--demo-tour", "--demo-tour-delay", "5000"]).unwrap();
+            Cli::try_parse_from(["wassup", "--demo-tour", "--demo-tour-delay", "5000"]).unwrap();
         assert_eq!(cli.demo_tour_delay, Some(5000));
-        assert!(Cli::try_parse_from(["zapfast", "--demo-tour-delay", "5000"]).is_err());
-        assert!(Cli::try_parse_from(["zapfast", "--demo-tour", "--demo-page", "login",]).is_err());
+        assert!(Cli::try_parse_from(["wassup", "--demo-tour-delay", "5000"]).is_err());
+        assert!(Cli::try_parse_from(["wassup", "--demo-tour", "--demo-page", "login",]).is_err());
     }
 
     #[test]
     fn tour_cli_picks_a_script_and_a_frame_capture() {
-        let cli = Cli::try_parse_from(["zapfast", "--demo-tour"]).unwrap();
+        let cli = Cli::try_parse_from(["wassup", "--demo-tour"]).unwrap();
         assert_eq!(
             tour_script(&cli.demo_tour_script),
             zapfast::demo::tour::Script::Launch
         );
         let cli = Cli::try_parse_from([
-            "zapfast",
+            "wassup",
             "--demo-tour",
             "--demo-tour-script",
             "whats-new",
@@ -1059,13 +1027,13 @@ mod tests {
         );
         assert_eq!(cli.demo_fps, Some(60));
         assert!(
-            Cli::try_parse_from(["zapfast", "--demo-tour", "--demo-tour-script", "other"]).is_err()
+            Cli::try_parse_from(["wassup", "--demo-tour", "--demo-tour-script", "other"]).is_err()
         );
-        assert!(Cli::try_parse_from(["zapfast", "--demo-tour-script", "whats-new"]).is_err());
-        assert!(Cli::try_parse_from(["zapfast", "--demo-tour", "--demo-fps", "30"]).is_err());
+        assert!(Cli::try_parse_from(["wassup", "--demo-tour-script", "whats-new"]).is_err());
+        assert!(Cli::try_parse_from(["wassup", "--demo-tour", "--demo-fps", "30"]).is_err());
         assert!(
             Cli::try_parse_from([
-                "zapfast",
+                "wassup",
                 "--demo-tour",
                 "--demo-tour-frames",
                 "frames",
@@ -1102,7 +1070,7 @@ mod startup_failure_tests {
             "The directory is not writable",
             std::path::Path::new("zapfast.log"),
         );
-        assert!(text.starts_with("ZapFast could not start."));
+        assert!(text.starts_with("Wassup could not start."));
         assert!(!text.contains("OpenGL"));
         assert!(text.contains("The directory is not writable"));
     }

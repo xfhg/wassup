@@ -178,7 +178,7 @@ impl Worker {
                     if let Ok(root) = root.canonicalize() {
                         anyhow::ensure!(
                             !parent.starts_with(root),
-                            "Choose a folder outside ZapFast's application data"
+                            "Choose a folder outside Wassup's application data"
                         );
                     }
                 }

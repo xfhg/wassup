@@ -142,7 +142,7 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
             bottom: 8,
         })
         .show(ui, |ui| {
-            // Where ZapFast draws the title bar, the header's top drags the
+            // Where Wassup draws the title bar, the header's top drags the
             // window and keeps clear of the caption buttons over a corner it
             // reaches: the left one, or both while it fills a narrow window.
             let top = ui.max_rect();
@@ -348,7 +348,7 @@ enum HeaderButton {
 const HEADER_ICON: f32 = 18.0;
 
 /// What the list header's first row needs beside the caption buttons
-/// ZapFast draws: the title and its buttons.
+/// Wassup draws: the title and its buttons.
 const LIST_HEADER_MIN_CONTENT: f32 = 230.0;
 
 /// The buttons on the right of the chat list header, rightmost first, as

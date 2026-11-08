@@ -901,7 +901,7 @@ pub struct App {
     /// texture each is drawn through.
     pub call_member_frames: HashMap<String, std::sync::Arc<egui::ColorImage>>,
     pub call_member_textures: HashMap<String, CallTexture>,
-    /// Whether ZapFast starts at login, when this installation supports it.
+    /// Whether Wassup starts at login, when this installation supports it.
     pub start_with_system: Option<bool>,
     /// The read or change of the login item running on its thread.
     login_item: crate::autostart::LoginItem,
@@ -935,7 +935,7 @@ pub struct App {
     /// its command line tool.
     #[cfg(test)]
     test_raised: bool,
-    /// Whether the tray menu offers "Lock ZapFast": whether an app lock
+    /// Whether the tray menu offers "Lock Wassup": whether an app lock
     /// password was set when it last changed.
     tray_lockable: bool,
     /// Whether the app is running without a window.
@@ -1211,7 +1211,7 @@ fn wayland_session() -> bool {
 }
 
 /// The app outlives its window: closing it with "keep running" on hides
-/// ZapFast, and the tray, a notification or another launch brings it back.
+/// Wassup, and the tray, a notification or another launch brings it back.
 impl fastframe_shell::Resident for App {
     fn closed(&self) -> fastframe_shell::Closed {
         if self.quit_requested {
@@ -1308,25 +1308,25 @@ fn tray_action(event: fastframe_tray::Event, window_hidden: bool) -> Option<Acti
     })
 }
 
-/// The tray item: ZapFast's icon, and a menu to show or hide the window,
+/// The tray item: Wassup's icon, and a menu to show or hide the window,
 /// to lock it while an app lock password is set, and to quit. The title and
 /// the menu never name a chat, so they are safe while locked.
 ///
-/// "Lock ZapFast" is always in the menu, hidden without a password;
+/// "Lock Wassup" is always in the menu, hidden without a password;
 /// `App::sync_tray` shows or hides it as the password is set or removed.
 fn tray_config(lockable: bool) -> fastframe_tray::Config {
     use fastframe_tray::MenuItem;
     fastframe_tray::Config {
-        id: "zapfast",
-        title: "ZapFast".into(),
+        id: "wassup",
+        title: "Wassup".into(),
         icon: crate::util::app_icon_rgba,
         template_icon: Some(crate::util::tray_template_rgba),
         // The icon changes with the unread count, which a host that has the
         // installed icon's name would draw instead.
         themed_icon: false,
         menu: vec![
-            MenuItem::action(TRAY_SHOW, "Show or hide ZapFast"),
-            MenuItem::action(TRAY_LOCK, "Lock ZapFast").visible(lockable),
+            MenuItem::action(TRAY_SHOW, "Show or hide Wassup"),
+            MenuItem::action(TRAY_LOCK, "Lock Wassup").visible(lockable),
             MenuItem::Separator,
             MenuItem::action(TRAY_QUIT, "Quit"),
         ],
@@ -1415,7 +1415,7 @@ impl App {
         app.pauses_media = true;
         app.call_tones = crate::call_tones::Tones::new(true);
         app.badge = Some(crate::notify::Badge::new(fastframe_desktop::desktop_entry(
-            "zapfast",
+            "wassup",
         )));
         app.custom_themes
             .enable_desktop_themes(crate::theme::DESKTOP_THEMES);
@@ -1488,7 +1488,7 @@ impl App {
     pub fn start_hidden(&mut self) {
         self.hide_intent = true;
         // No window will attach the tray, which makes the macOS item; make
-        // it now without bringing ZapFast forward.
+        // it now without bringing Wassup forward.
         if let Some(tray) = &mut self.tray {
             tray.create_item();
         }
@@ -1538,7 +1538,7 @@ impl App {
                 _ => Palette::dark(),
             });
         let locale = crate::i18n::resolve(settings.interface_language);
-        // With a password set, ZapFast starts locked.
+        // With a password set, Wassup starts locked.
         let app_lock = crate::app_lock::AppLock::new(settings.app_lock_hash.is_some());
         let tray_lockable = settings.app_lock_hash.is_some();
         let mut app = Self {
@@ -2218,7 +2218,7 @@ impl App {
 
     /// Whether a panel shows the tray item now, so a hidden window can be
     /// brought back from it. On Linux the item exists before a panel shows
-    /// it (ZapFast started at login before the panel), and on a desktop
+    /// it (Wassup started at login before the panel), and on a desktop
     /// without one it never is.
     fn tray_shown(&self) -> bool {
         #[cfg(test)]
@@ -2330,7 +2330,7 @@ impl App {
         self.tray_colour_checked = None;
     }
 
-    /// Offers "Lock ZapFast" in the tray exactly while an app lock password
+    /// Offers "Lock Wassup" in the tray exactly while an app lock password
     /// is set, so setting or removing one changes the menu at once, and
     /// makes the item when the setting that wants it is turned on.
     fn sync_tray(&mut self) {
@@ -2570,11 +2570,11 @@ impl App {
     }
 
     /// Announces a message while the app lock is on, or with notification
-    /// content turned off: "New message" from ZapFast, without the chat, the
+    /// content turned off: "New message" from Wassup, without the chat, the
     /// sender, the text or a picture, so the desktop shows nothing the lock
     /// screen hides. A chat's own sound and the mention sound would tell who
     /// wrote, so only the message sound plays, still silent for groups when
-    /// group sounds are off. The click target stays inside ZapFast: it opens
+    /// group sounds are off. The click target stays inside Wassup: it opens
     /// the message, once unlocked behind the lock.
     fn notify_without_content(
         &mut self,
@@ -3657,6 +3657,50 @@ impl App {
 
     fn apply_backend_event(&mut self, event: Event, live: bool) {
         match event {
+            Event::CaptureStatus(status) => self.capture_status = Some(status),
+            Event::DeletedLoaded {
+                request,
+                messages,
+                next_before,
+                error,
+            } => {
+                if request != self.deleted_request {
+                    return;
+                }
+                self.deleted_loading = false;
+                self.deleted_error = error;
+                if self.deleted_error.is_some() {
+                    self.deleted_messages.clear();
+                } else if self.deleted_preserve && next_before.is_some() {
+                    // Keep already loaded older originals when the first page
+                    // moves. Reading one sender must not erase its selection.
+                    let boundary = next_before.expect("checked cursor");
+                    self.deleted_messages
+                        .retain(|row| row.saved.sequence < boundary);
+                    self.deleted_messages.extend(messages);
+                    self.deleted_messages
+                        .sort_by_key(|row| std::cmp::Reverse(row.saved.sequence));
+                } else if self.deleted_append {
+                    let existing = self
+                        .deleted_messages
+                        .iter()
+                        .map(|row| row.saved.sequence)
+                        .collect::<HashSet<_>>();
+                    self.deleted_messages.extend(
+                        messages
+                            .into_iter()
+                            .filter(|row| !existing.contains(&row.saved.sequence)),
+                    );
+                } else {
+                    self.deleted_messages = messages;
+                }
+                // A refresh can jump ahead by more than one page. Continue
+                // from its boundary so newly arrived rows in the gap remain
+                // reachable; append deduplication handles any overlap.
+                self.deleted_cursor = next_before;
+                self.deleted_has_more = self.deleted_cursor.is_some();
+                self.deleted_refresh_due = Some(Instant::now() + Duration::from_secs(5));
+            }
             Event::StorageStats {
                 stats,
                 token,
@@ -4841,9 +4885,12 @@ impl App {
                 }
             }
             Event::UpdateAvailable { version, url } => {
+                if !crate::updates::ENABLED {
+                    return;
+                }
                 let notice = crate::updates::Release { version, url };
                 if self.update.as_ref() != Some(&notice) {
-                    self.toast(format!("ZapFast {} is available", notice.version));
+                    self.toast(format!("Wassup {} is available", notice.version));
                 }
                 self.update = Some(notice);
             }
@@ -4904,7 +4951,7 @@ impl App {
                     .into_owned(),
                     crate::calls::CALL_LINKS_OFF => crate::i18n::gettext(
                         self.locale,
-                        "ZapFast can't join group calls yet: open the link on your phone.",
+                        "Wassup can't join group calls yet: open the link on your phone.",
                     )
                     .into_owned(),
                     "Connect to WhatsApp to change disappearing messages." => {
@@ -4977,7 +5024,7 @@ impl App {
                     ),
                     ArchiveFailure::Write => crate::i18n::gettext(
                         self.locale,
-                        "WhatsApp updated this chat, but ZapFast could not save the change",
+                        "WhatsApp updated this chat, but Wassup could not save the change",
                     ),
                 };
                 self.toast_error(message);
@@ -5117,6 +5164,17 @@ impl App {
                 self.contacts.clear();
                 self.avatars.clear();
                 self.starred.clear();
+                self.deleted_messages.clear();
+                self.deleted_query.clear();
+                self.deleted_selected_sender = None;
+                self.deleted_show_thread = false;
+                self.deleted_request = self.deleted_request.wrapping_add(1);
+                self.deleted_loading = false;
+                self.deleted_has_more = false;
+                self.deleted_error = None;
+                self.deleted_cursor = None;
+                self.deleted_paged = false;
+                self.deleted_refresh_due = None;
                 self.show_starred = false;
                 self.stars.clear();
                 self.pins.clear();
@@ -5732,12 +5790,13 @@ impl App {
             Unsent::Sticker | Unsent::Gif => {}
         }
         let message = match reason {
+            Refusal::CaptureUnavailable => "Not sent: the permanent archive could not save a copy. Your message has been restored.".into(),
             Refusal::Blocked => {
                 crate::i18n::gettext(self.locale, "Unblock this contact to send messages.")
             }
             Refusal::Offline => crate::i18n::gettext(
                 self.locale,
-                "Not sent: ZapFast is not connected to WhatsApp.",
+                "Not sent: Wassup is not connected to WhatsApp.",
             ),
             Refusal::QuoteUnavailable => crate::i18n::gettext(
                 self.locale,
@@ -6921,6 +6980,16 @@ impl App {
     fn tick(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
         self.tick_call(ctx);
+        if self.page == Page::Deleted
+            && !self.backend.is_offline()
+            && !self.deleted_paged
+            && self.deleted_query.is_empty()
+        {
+            if !self.deleted_loading && self.deleted_refresh_due.is_none_or(|at| at <= now) {
+                self.request_deleted_mode(false, true);
+            }
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
         if self.composing
             && let Some(last) = self.last_keystroke
             && now.duration_since(last) > COMPOSING_TIMEOUT
@@ -6935,7 +7004,8 @@ impl App {
         self.toasts.retain(|toast| {
             toast.kind == ToastKind::Error || toast.created.elapsed() < INFO_TOAST_LIFETIME
         });
-        if self.settings.check_for_updates
+        if crate::updates::ENABLED
+            && self.settings.check_for_updates
             && !self.backend.is_offline()
             && self
                 .last_update_check
@@ -6985,6 +7055,9 @@ impl App {
     }
 
     fn inspect_update(&mut self) {
+        if !crate::updates::ENABLED {
+            return;
+        }
         if self.update_support.is_none() && !self.update_inspecting {
             self.update_inspecting = true;
             self.backend.send(Command::InspectUpdate);
@@ -6992,6 +7065,9 @@ impl App {
     }
 
     fn maybe_download_update(&mut self) {
+        if !crate::updates::ENABLED {
+            return;
+        }
         if !self.settings.check_for_updates
             || !self.settings.download_updates_automatically
             || self.update.is_none()
@@ -7006,6 +7082,10 @@ impl App {
     }
 
     fn download_update(&mut self) {
+        if !crate::updates::ENABLED {
+            self.toast_error(crate::updates::DISABLED_REASON);
+            return;
+        }
         if !matches!(
             self.update_download,
             crate::updates::DownloadState::Idle | crate::updates::DownloadState::Failed(_)
@@ -7373,6 +7453,14 @@ impl App {
             }
             Action::Open(page) => {
                 let opens_chats = page == Page::Chats;
+                if page == Page::Deleted {
+                    if self.page != Page::Deleted {
+                        self.deleted_show_thread = false;
+                    }
+                    self.request_deleted(false);
+                    self.show_starred = false;
+                    self.open_message_menu = None;
+                }
                 // Privacy can change on the phone at any time, and nothing
                 // announces it: read it again whenever Settings opens.
                 if page == Page::Settings && self.page != Page::Settings && self.is_connected() {
@@ -7418,6 +7506,19 @@ impl App {
                     self.settings_search.clear();
                     self.refocus_composer(ctx);
                 }
+            }
+            Action::RefreshDeleted => self.request_deleted(false),
+            Action::MoreDeleted => self.request_deleted(true),
+            Action::BackDeleted => {
+                if self.deleted_show_thread {
+                    self.deleted_show_thread = false;
+                } else {
+                    self.apply(Action::Open(Page::Chats), ctx);
+                }
+            }
+            Action::FocusDeletedSearch => {
+                self.deleted_show_thread = false;
+                ctx.memory_mut(|memory| memory.request_focus(crate::ui::deleted::search_id()))
             }
             Action::ToggleSettings => {
                 // The button that opened settings closes them again, and
@@ -7811,7 +7912,7 @@ impl App {
                     // own, or one that never decodes would download forever:
                     // the bubble offers the retry, as a failed download does.
                     log::warn!("a downloaded attachment could not be displayed");
-                    media.state = MediaState::Failed("ZapFast could not display this file".into());
+                    media.state = MediaState::Failed("Wassup could not display this file".into());
                 } else if !matches!(media.state, MediaState::Downloading) {
                     // Gone from the disk: it downloads again like any
                     // attachment that was never downloaded.
@@ -7970,6 +8071,18 @@ impl App {
                     preview.show_album_item(path, item.id.clone(), item.card);
                 }
             }
+            Action::OpenSavedFile { chat, path } => {
+                let allowed = self.chat(&chat).is_some_and(|chat| !chat.locked)
+                    && self.capture_status.as_ref().is_some_and(|status| {
+                        path.canonicalize()
+                            .is_ok_and(|actual| actual.starts_with(&status.root))
+                    });
+                if allowed {
+                    self.apply(Action::OpenFile(path), ctx);
+                } else {
+                    self.toast_error("The saved file is unavailable or this chat is locked");
+                }
+            }
             Action::OpenFile(path) => {
                 let allowed = crate::safety::can_open_attachment(&path);
                 if allowed && matches!(path.try_exists(), Ok(false)) {
@@ -8026,7 +8139,7 @@ impl App {
                     } else {
                         self.toast(crate::i18n::gettext(
                             self.locale,
-                            "ZapFast can't join group calls yet: open the link on your phone.",
+                            "Wassup can't join group calls yet: open the link on your phone.",
                         ));
                     }
                 } else if let Some(code) = crate::safety::group_invite_code(&url) {
@@ -8039,7 +8152,7 @@ impl App {
                 } else if let Some(url) = crate::safety::external_url(&url) {
                     ctx.open_url(egui::OpenUrl::new_tab(url));
                 } else {
-                    self.toast_error("This link type cannot be opened from ZapFast");
+                    self.toast_error("This link type cannot be opened from Wassup");
                 }
             }
             Action::CopyText(text) => {
@@ -9276,7 +9389,7 @@ impl App {
                     self.toast_error(
                         crate::i18n::gettext(
                             self.locale,
-                            "You have {limit} labels, the most ZapFast keeps.",
+                            "You have {limit} labels, the most Wassup keeps.",
                         )
                         .replace("{limit}", &crate::archive::LABEL_LIMIT.to_string()),
                     );
@@ -9533,12 +9646,20 @@ impl App {
                 self.request_chat_search();
             }
             Action::ShowUpdate => {
+                if !crate::updates::ENABLED {
+                    self.toast_error(crate::updates::DISABLED_REASON);
+                    return;
+                }
                 self.show_update = self.update.is_some();
                 self.inspect_update();
             }
             Action::CloseUpdate => self.show_update = false,
             Action::DownloadUpdate => self.download_update(),
             Action::InstallUpdate => {
+                if !crate::updates::ENABLED {
+                    self.toast_error(crate::updates::DISABLED_REASON);
+                    return;
+                }
                 if matches!(
                     self.update_download,
                     crate::updates::DownloadState::Ready(_)
@@ -9888,6 +10009,9 @@ impl App {
                 }
             }
             Action::SetStartWithSystem(enabled) => {
+                if self.backend.is_offline() {
+                    return;
+                }
                 let waker = self.waker.clone();
                 self.login_item.set(enabled, move || waker.wake());
             }
@@ -10342,6 +10466,34 @@ impl App {
         self.focus_composer = true;
     }
 
+    /// Read-only archive navigation. Requests are scoped to this account and
+    /// invalidated on unlink; older replies cannot replace a newer page.
+    fn request_deleted(&mut self, more: bool) {
+        self.request_deleted_mode(more, false);
+    }
+
+    fn request_deleted_mode(&mut self, more: bool, preserve: bool) {
+        if more && (self.deleted_loading || !self.deleted_has_more) {
+            return;
+        }
+        let before = if more { self.deleted_cursor } else { None };
+        self.deleted_request = self.deleted_request.wrapping_add(1);
+        self.deleted_loading = true;
+        self.deleted_error = None;
+        self.deleted_append = more;
+        self.deleted_preserve = preserve;
+        self.deleted_paged = more;
+        self.deleted_refresh_due = Some(Instant::now() + Duration::from_secs(5));
+        if !more && !preserve {
+            self.deleted_cursor = None;
+            self.deleted_has_more = false;
+        }
+        self.backend.send(Command::LoadDeleted {
+            request: self.deleted_request,
+            before,
+        });
+    }
+
     /// Asks the worker for the starred list again, for the one on screen. A
     /// message that changed in the archive is a stale row otherwise.
     fn reload_lists(&mut self) {
@@ -10492,9 +10644,24 @@ impl App {
         match outcome.state {
             Ok(state) => {
                 self.start_with_system = crate::autostart::switch(state);
+                match crate::autostart::initial_setup(
+                    self.settings.login_registration_complete,
+                    state,
+                    outcome.requested,
+                ) {
+                    crate::autostart::InitialSetup::Remember => {
+                        self.settings.login_registration_complete = true;
+                        self.mark_settings_dirty();
+                    }
+                    crate::autostart::InitialSetup::Enable if !self.backend.is_offline() => {
+                        let waker = self.waker.clone();
+                        self.login_item.set(true, move || waker.wake());
+                    }
+                    _ => {}
+                }
                 if outcome.changed && matches!(state, fastframe_autostart::State::NeedsApproval(_))
                 {
-                    self.toast("Allow ZapFast in System Settings, under Login Items.");
+                    self.toast("Allow Wassup in System Settings, under Login Items.");
                 }
             }
             Err(error) => {
@@ -10505,7 +10672,7 @@ impl App {
         }
     }
 
-    /// Collects a finished password check, and locks once ZapFast has gone
+    /// Collects a finished password check, and locks once Wassup has gone
     /// unused for the chosen time. Inactivity counts while the window is
     /// hidden too: only input in the window restarts it.
     fn tick_app_lock(&mut self, ctx: &egui::Context) {
@@ -10522,7 +10689,7 @@ impl App {
         if self.app_lock.is_locked() {
             return;
         }
-        // Recording a voice message is using ZapFast, keys or not.
+        // Recording a voice message is using Wassup, keys or not.
         if self.recording.is_some() {
             self.app_lock.note_input();
         }
@@ -12669,6 +12836,160 @@ mod tests {
     fn app() -> App {
         let root = std::env::temp_dir().join(format!("zapfast-app-{}", std::process::id()));
         App::headless(AppDirs::under(&root), Settings::default()).0
+    }
+
+    fn deleted_fixture(sequence: i64) -> crate::backend::DeletedMessage {
+        let chat = "fixture@s.whatsapp.net".to_owned();
+        crate::backend::DeletedMessage {
+            sender_id: "fixture@s.whatsapp.net".into(),
+            canonical_chat: chat.clone(),
+            chat_name: "Fixture".into(),
+            sender_name: "Fixture".into(),
+            reason: "Deleted for me".into(),
+            saved: crate::capture::view::SavedMessage {
+                sequence,
+                chat,
+                message_id: format!("saved-{sequence}"),
+                sender: "fixture@s.whatsapp.net".into(),
+                text: "Permanent original".into(),
+                sent_at: 1_700_000_000,
+                observed_at: 1_700_000_000,
+                outgoing: false,
+                observed_on_whatsapp: true,
+                send_accepted: false,
+                deletion_observed: false,
+                source: "durable_inbound".into(),
+                markdown_path: PathBuf::from("fixture.md"),
+                attachments: Vec::new(),
+                history: Vec::new(),
+                history_truncated: false,
+            },
+        }
+    }
+
+    #[test]
+    fn deleted_pages_ignore_stale_replies_and_deduplicate_pagination() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.apply(Action::Open(Page::Deleted), &ctx);
+        let first = app.deleted_request;
+        app.apply(Action::RefreshDeleted, &ctx);
+        let current = app.deleted_request;
+        app.apply_backend_event(
+            Event::DeletedLoaded {
+                request: first,
+                messages: vec![deleted_fixture(9)],
+                next_before: None,
+                error: None,
+            },
+            true,
+        );
+        assert!(app.deleted_loading);
+        assert!(app.deleted_messages.is_empty());
+        app.apply_backend_event(
+            Event::DeletedLoaded {
+                request: current,
+                messages: vec![deleted_fixture(3)],
+                next_before: Some(3),
+                error: None,
+            },
+            true,
+        );
+        app.apply(Action::MoreDeleted, &ctx);
+        let more = app.deleted_request;
+        app.apply(Action::MoreDeleted, &ctx);
+        assert_eq!(more, app.deleted_request);
+        app.apply_backend_event(
+            Event::DeletedLoaded {
+                request: more,
+                messages: vec![deleted_fixture(3), deleted_fixture(2)],
+                next_before: None,
+                error: None,
+            },
+            true,
+        );
+        assert_eq!(
+            app.deleted_messages
+                .iter()
+                .map(|row| row.saved.sequence)
+                .collect::<Vec<_>>(),
+            vec![3, 2]
+        );
+        assert!(!app.deleted_has_more);
+        assert!(!app.chat_view());
+    }
+
+    #[test]
+    fn automatic_deleted_refresh_keeps_older_selected_sender_entries() {
+        let mut app = app();
+        app.deleted_messages = vec![deleted_fixture(3), deleted_fixture(2)];
+        app.deleted_selected_sender = Some("fixture@s.whatsapp.net".into());
+        app.deleted_cursor = Some(2);
+        app.request_deleted_mode(false, true);
+        app.apply_backend_event(
+            Event::DeletedLoaded {
+                request: app.deleted_request,
+                messages: vec![deleted_fixture(105), deleted_fixture(104)],
+                next_before: Some(104),
+                error: None,
+            },
+            true,
+        );
+        assert_eq!(
+            app.deleted_messages
+                .iter()
+                .map(|row| row.saved.sequence)
+                .collect::<Vec<_>>(),
+            vec![105, 104, 3, 2]
+        );
+        assert_eq!(
+            app.deleted_selected_sender.as_deref(),
+            Some("fixture@s.whatsapp.net")
+        );
+        assert_eq!(app.deleted_cursor, Some(104));
+        app.request_deleted(true);
+        assert!(app.deleted_append);
+        assert_eq!(app.deleted_cursor, Some(104));
+    }
+
+    #[test]
+    fn unlink_invalidates_deleted_page_and_in_flight_results() {
+        let mut app = app();
+        app.request_deleted(false);
+        let request = app.deleted_request;
+        app.deleted_messages.push(deleted_fixture(1));
+        app.handle_link(LinkStatus::LoggedOut, true);
+        assert!(app.deleted_messages.is_empty());
+        app.apply_backend_event(
+            Event::DeletedLoaded {
+                request,
+                messages: vec![deleted_fixture(1)],
+                next_before: None,
+                error: None,
+            },
+            true,
+        );
+        assert!(app.deleted_messages.is_empty());
+        assert!(!app.deleted_loading);
+    }
+
+    #[test]
+    fn deleted_page_privacy_or_storage_error_removes_cached_rows() {
+        let mut app = app();
+        app.request_deleted(false);
+        app.deleted_messages.push(deleted_fixture(1));
+        app.apply_backend_event(
+            Event::DeletedLoaded {
+                request: app.deleted_request,
+                messages: Vec::new(),
+                next_before: None,
+                error: Some("Waiting for chat privacy settings".into()),
+            },
+            true,
+        );
+        assert!(app.deleted_messages.is_empty());
+        assert!(app.deleted_error.is_some());
+        assert!(!app.deleted_loading);
     }
 
     #[test]
@@ -15103,7 +15424,7 @@ mod tests {
         );
     }
 
-    /// `zapfast quit` takes the tray's Quit path, and does even behind the
+    /// `wassup quit` takes the tray's Quit path, and does even behind the
     /// app lock, since quitting reveals nothing.
     #[test]
     fn a_quit_request_quits_even_behind_the_lock() {
@@ -15603,7 +15924,7 @@ mod tests {
         );
     }
 
-    /// Demo and test runs share the machine with a linked ZapFast, whose real
+    /// Demo and test runs share the machine with a linked Wassup, whose real
     /// taskbar badge they must not overwrite.
     /// A background page is not an answer to a request the reader made.
     /// Counting it as one would look like the phone missing, and back off the
@@ -17959,7 +18280,7 @@ mod tests {
         assert!(!app.hide_intent);
     }
 
-    /// On Linux the tray item exists before a panel shows it (ZapFast started
+    /// On Linux the tray item exists before a panel shows it (Wassup started
     /// at login before the panel, or a desktop without one). Until a panel
     /// shows it, closing quits and the window is not hidden, since nothing
     /// could bring it back. A hidden start waits for a panel instead; see
@@ -17988,7 +18309,7 @@ mod tests {
         assert!(!Resident::start_hidden(&mut app));
     }
 
-    /// At login on GNOME the tray watcher comes up after ZapFast (#429): a
+    /// At login on GNOME the tray watcher comes up after Wassup (#429): a
     /// hidden start keeps the window hidden while it waits for a panel, stays
     /// hidden once one shows the item, and shows the window if none has
     /// within `TRAY_WAIT`.
@@ -18761,8 +19082,8 @@ mod tests {
             assert_eq!(
                 super::tray_config(lockable).menu,
                 [
-                    fastframe_tray::MenuItem::action(super::TRAY_SHOW, "Show or hide ZapFast"),
-                    fastframe_tray::MenuItem::action(super::TRAY_LOCK, "Lock ZapFast")
+                    fastframe_tray::MenuItem::action(super::TRAY_SHOW, "Show or hide Wassup"),
+                    fastframe_tray::MenuItem::action(super::TRAY_LOCK, "Lock Wassup")
                         .visible(lockable),
                     fastframe_tray::MenuItem::Separator,
                     fastframe_tray::MenuItem::action(super::TRAY_QUIT, "Quit"),
@@ -18771,7 +19092,7 @@ mod tests {
         }
     }
 
-    /// The tray offers "Lock ZapFast" as soon as a password is set and stops
+    /// The tray offers "Lock Wassup" as soon as a password is set and stops
     /// as soon as it is removed, not at the next start.
     #[test]
     fn the_tray_offers_the_lock_while_a_password_is_set() {
@@ -18888,40 +19209,32 @@ mod tests {
     }
 
     #[test]
-    fn automatic_updates_require_opt_in_and_explicit_restart() {
+    fn private_build_refuses_updates_even_when_old_settings_enable_them() {
         use crate::updates::{DownloadState, Installation, Kind, Prepared};
         let mut app = app();
         let ctx = egui::Context::default();
         app.update = Some(crate::updates::Release {
             version: "99.0.0".into(),
-            url: "https://github.com/crmne/zapfast/releases/latest".into(),
+            url: "https://example.invalid/releases/latest".into(),
         });
-        app.update_support = Some(Err("Use your package manager".into()));
-        app.settings.download_updates_automatically = true;
-        app.maybe_download_update();
-        assert!(matches!(app.update_download, DownloadState::Idle));
         let installation = Installation {
-            executable: PathBuf::from("/fixture/zapfast"),
+            executable: PathBuf::from("/fixture/wassup"),
             kind: Kind::Portable,
         };
         app.update_support = Some(Ok(installation.clone()));
-        app.settings.download_updates_automatically = false;
-        app.maybe_download_update();
-        assert!(matches!(app.update_download, DownloadState::Idle));
+        app.settings.check_for_updates = true;
         app.settings.download_updates_automatically = true;
         app.maybe_download_update();
-        assert!(matches!(
-            app.update_download,
-            DownloadState::Downloading { .. }
-        ));
+        assert!(matches!(app.update_download, DownloadState::Idle));
+        app.apply(Action::DownloadUpdate, &ctx);
+        assert!(matches!(app.update_download, DownloadState::Idle));
         app.update_download =
             DownloadState::Ready(Box::new(Prepared::sample(installation, "99.0.0")));
-        app.maybe_download_update();
+        app.apply(Action::InstallUpdate, &ctx);
         assert!(matches!(app.update_download, DownloadState::Ready(_)));
         assert!(!app.quit_requested);
-        app.apply(Action::InstallUpdate, &ctx);
-        assert!(matches!(app.update_download, DownloadState::Installing));
-        assert!(!app.quit_requested, "wait for the helper before closing");
+        app.apply(Action::ShowUpdate, &ctx);
+        assert!(!app.show_update);
     }
 
     #[test]
@@ -26768,7 +27081,7 @@ mod app_lock_tests {
         app.lock_app();
         app.maybe_notify(CHAT, &message);
         let shown = app.notifications.shown.last().unwrap();
-        assert_eq!(shown.title, "ZapFast");
+        assert_eq!(shown.title, "Wassup");
         assert_eq!(shown.body, "New message");
         assert_eq!(shown.picture, None);
         assert_eq!(
@@ -26803,7 +27116,7 @@ mod app_lock_tests {
         app.settings.notification_content = false;
         app.maybe_notify(CHAT, &message);
         let shown = app.notifications.shown.last().unwrap().clone();
-        assert_eq!(shown.title, "ZapFast");
+        assert_eq!(shown.title, "Wassup");
         assert_eq!(shown.body, "New message");
         assert_eq!(shown.picture, None);
         assert_eq!(shown.sound, app.settings.message_sound);

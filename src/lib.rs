@@ -1,4 +1,4 @@
-//! ZapFast internals exposed for diagnostics and tests.
+//! Wassup internals exposed for diagnostics and tests.
 
 pub mod a11y;
 pub mod account;
@@ -15,11 +15,13 @@ pub mod backdrop;
 pub mod backend;
 pub mod bidi;
 pub mod blocking;
+pub(crate) mod branding;
 pub mod call_audio;
 pub mod call_diag;
 pub mod call_tones;
 pub mod calls;
 pub mod camera;
+pub mod capture;
 #[cfg(any(test, feature = "demo"))]
 pub mod demo;
 pub mod diagnostics;

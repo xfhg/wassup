@@ -1168,26 +1168,25 @@ pub fn switch(ui: &mut Ui, palette: &Palette, on: &mut bool) -> egui::Response {
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// The author's website, linked from the credit line.
-pub const AUTHOR_URL: &str = "https://paolino.me";
+/// The private build author's profile, linked from the credit line.
+pub const AUTHOR_URL: &str = crate::branding::PROFILE_URL;
 
-/// "Built with love by Carmine Paolino", with the name linking to
+/// The private build credit, with the author's name linking to
 /// [`AUTHOR_URL`]. Returns whether the name was clicked.
 pub fn credit(ui: &mut Ui, palette: &Palette, locale: crate::i18n::Locale) -> bool {
-    // Translators: {name} is replaced by the author's name, shown as a link.
-    let sentence = crate::i18n::gettext(locale, "Built with love by {name}");
-    let (before, after) = sentence.split_once("{name}").unwrap_or((&sentence, ""));
+    let before = crate::i18n::gettext(locale, crate::branding::CREDIT_PREFIX);
     let mut clicked = false;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
-        theme::text(ui, "\u{2665}  ", theme::regular(13.0), palette.danger);
         theme::text(ui, before, theme::regular(13.0), palette.secondary);
-        clicked = theme::link(ui, "Carmine Paolino", theme::medium(13.0), palette.link)
-            .on_hover_text(AUTHOR_URL)
-            .clicked();
-        if !after.is_empty() {
-            theme::text(ui, after, theme::regular(13.0), palette.secondary);
-        }
+        clicked = theme::link(
+            ui,
+            crate::branding::AUTHOR,
+            theme::medium(13.0),
+            palette.link,
+        )
+        .on_hover_text(AUTHOR_URL)
+        .clicked();
     });
     clicked
 }
@@ -1574,9 +1573,9 @@ pub fn bubble_shape(
 /// The text size Messages lays its balloons out for on the Mac: ChatKit's
 /// `CKUIBehaviorMac.balloonTextFont` is the 13 pt system font.
 pub const MESSAGES_TEXT_SIZE: f32 = 13.0;
-/// The size of a message's text in ZapFast, every theme alike.
+/// The size of a message's text in Wassup, every theme alike.
 pub const MESSAGE_TEXT_SIZE: f32 = 14.5;
-/// How much larger than Messages' own a ZapFast balloon is drawn: its
+/// How much larger than Messages' own a Wassup balloon is drawn: its
 /// geometry keeps Apple's proportions to the text it holds.
 pub const MESSAGES_SCALE: f32 = MESSAGE_TEXT_SIZE / MESSAGES_TEXT_SIZE;
 
@@ -1687,7 +1686,7 @@ pub mod balloon {
     /// The tallest balloon still drawn as a single line. Messages picks the
     /// image by its line count: one line of its 13 pt text is 29.3 points
     /// high with the 7 point insets above and below it
-    /// (`CKUIBehaviorMac.textBalloonPillContentInsets`), two are 44.6; ZapFast
+    /// (`CKUIBehaviorMac.textBalloonPillContentInsets`), two are 44.6; Wassup
     /// splits the difference.
     pub const SINGLE_LINE_MAX: f32 = 37.0;
 }
@@ -2852,7 +2851,7 @@ mod tests {
 
     /// The balloon grows with the text it holds: at twice the scale, a body
     /// twice the size has a tail reaching twice as far and four times the
-    /// area. ZapFast's scale is its text size over Messages' 13 points.
+    /// area. Wassup's scale is its text size over Messages' 13 points.
     #[test]
     fn messages_balloons_scale_with_text_size() {
         assert_eq!(MESSAGES_SCALE, MESSAGE_TEXT_SIZE / MESSAGES_TEXT_SIZE);

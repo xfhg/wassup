@@ -1,12 +1,11 @@
 [package]
-name = "zapfast"
+name = "wassup"
 version = "0.21.1"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
-description = "A native WhatsApp client built with Rust and egui"
-homepage = "https://zapfast.rocks"
-repository = "https://github.com/crmne/zapfast"
+description = "A native WhatsApp client that preserves received messages after deletion"
+repository = "https://github.com/xfhg"
 keywords = ["whatsapp", "chat", "egui", "messaging"]
 categories = ["gui"]
 
@@ -15,11 +14,13 @@ name = "zapfast"
 path = "src/lib.rs"
 
 [[bin]]
-name = "zapfast"
+name = "wassup"
 path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+async-trait = "0.1"
+libc = "0.2"
 # Hashes saved stickers by content. Already included through wacore.
 sha2 = "0.11"
 # Already in the tree through rustls; verifies lock codes.
@@ -58,8 +59,8 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # and snapshot replay (#1507), the viewer's channel mute state (#1537), favorite
 # and recent sticker sync events (#1538), boolean AB props (#1539), favorite
 # chats sync (#1544), media re-upload that works and expired downloads that no
-# longer force a media_conn refresh each (#1648, #1653, #1659; the 429s of
-# ZapFast #405), and the typed send, edit, picture and poll APIs (#1614, #1626,
+# longer force a media_conn refresh each (#1648, #1653, #1659), and the
+# typed send, edit, picture and poll APIs (#1614, #1626,
 # #1630, #1640). Protobuf structs are non-exhaustive since #1676, so they are
 # built from `Default` and assigned field by field. Device-store
 # compatibility retains the legacy created_at column. All carried fixes have
@@ -138,7 +139,7 @@ openh264-sys2 = { version = "0.9", default-features = false }
 # has it.
 mp4 = { git = "https://github.com/crmne/mp4-rust", rev = "35560e94f5e871a2b2d88bfe964013b39af131e8" }
 # rodio decodes and mixes; fastframe-audio plays and records, so neither of
-# rodio's own device features is on. The crmne/rodio fork (branch `zapfast`)
+# rodio's own device features is on. The pinned crmne/rodio fork
 # is upstream's master, which carries what no release has yet:
 # RustAudio/rodio#833 (https://github.com/RustAudio/rodio/pull/833), without
 # which an MP4 with a picture and a sound track plays a tenth of a second of
@@ -186,10 +187,10 @@ fastframe-theme = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" 
 fastframe-log = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
 # The tray item: StatusNotifier on Linux, tray-icon on Windows and macOS.
 fastframe-tray = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
-# Keeps ZapFast running without a window, remembers its geometry, recovers it
+# Keeps Wassup running without a window, remembers its geometry, recovers it
 # off screen, and brings it forward on niri.
 fastframe-shell = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
-# Window chrome: centres the macOS traffic lights on ZapFast's own header and
+# Window chrome: centres the macOS traffic lights on Wassup's own header and
 # lets its headers move the window.
 fastframe-titlebar = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4" }
 # One running copy per user: the lock, and the channel a second launch uses.
@@ -221,7 +222,7 @@ fastframe-update = { git = "https://github.com/crmne/fastframe", tag = "v0.15.4"
 
 [patch.crates-io]
 # crmne/egui apps-0.36.2, shared with Spotifast, RekordFlash and TonePush: egui
-# 0.36.2 with right-to-left shaping and glyph clusters from crmne/zapfast#144
+# 0.36.2 with right-to-left shaping and glyph clusters
 # and digits shaped left to right in text without right-to-left letters (#184)
 # (emilk/egui#8577), egui's busy-loop fix (emilk/egui#8398), and eframe pacing
 # Wayland frames by the compositor's frame callbacks so a window the
@@ -269,8 +270,6 @@ zbus-secret-service-keyring-store = { version = "1.0.1", features = ["rt-tokio-c
 # Pauses MPRIS media players while recording or playing voice messages.
 # Already in the tree through fastframe-notifications and fastframe-tray.
 zbus = { version = "5.19", default-features = false, features = ["blocking-api", "tokio"] }
-# Reads the time locale's clock format.
-libc = "0.2"
 # The camera for video calls, through Video4Linux, in Rust: no build-time
 # bindings, so building on Linux needs nothing new.
 linuxvideo = "0.3.5"

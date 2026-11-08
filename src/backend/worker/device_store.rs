@@ -1,7 +1,7 @@
-//! Compatibility for returning to ZapFast 0.14 after the library's migration.
+//! Compatibility with older device-store writers after the library's migration.
 //!
 //! The protocol library owns the device schema and all message-secret access.
-//! Its new migration drops an unused column that 0.14 still writes. Retain that
+//! Its new migration drops an unused column that older writers still use. Retain that
 //! column after migration, without reading or rewriting any stored secrets.
 
 use std::path::Path;

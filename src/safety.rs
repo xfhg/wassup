@@ -55,7 +55,7 @@ pub fn external_url(value: &str) -> Option<String> {
     }
 }
 
-/// Image formats decoded by ZapFast's in-process preview.
+/// Image formats decoded by Wassup's in-process preview.
 pub fn can_preview_image(path: &Path) -> bool {
     let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
         return false;
@@ -68,7 +68,7 @@ pub fn can_preview_image(path: &Path) -> bool {
 
 /// The code of a WhatsApp group invite link such as
 /// `https://chat.whatsapp.com/AbCd123` or `whatsapp://chat/?code=AbCd123`,
-/// which ZapFast opens itself.
+/// which Wassup opens itself.
 pub fn group_invite_code(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -147,7 +147,7 @@ fn is_valid_group_invite_code(code: &str) -> bool {
 /// A WhatsApp call link such as `https://call.whatsapp.com/voice/AbCd123`:
 /// its token, and whether it is a video call's (`/video/`) rather than a
 /// voice call's (`/voice/`, or `/audio/` as whatsapp-rust writes it).
-/// ZapFast joins these itself.
+/// Wassup joins these itself.
 pub fn call_link(value: &str) -> Option<(String, bool)> {
     let url = reqwest::Url::parse(value.trim()).ok()?;
     if !matches!(url.scheme(), "http" | "https")

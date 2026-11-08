@@ -317,7 +317,9 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
             // A narrow window shows the picked call's chat over the history:
             // Escape goes back to it, as the chat's Back does.
             actions.push(Action::CloseChat);
-        } else if app.page == Page::Settings || app.page == Page::Calls {
+        } else if app.page == Page::Deleted {
+            actions.push(Action::BackDeleted);
+        } else if matches!(app.page, Page::Settings | Page::Calls) {
             actions.push(Action::Open(Page::Chats));
         } else if search_focused || !app.search.is_empty() {
             if !app.search.is_empty() {
@@ -996,6 +998,7 @@ fn sticker_view_keys(app: &mut App, ctx: &egui::Context) {
 fn find_action(app: &App) -> Action {
     match app.page {
         Page::Settings => Action::FocusSettingsSearch,
+        Page::Deleted => Action::FocusDeletedSearch,
         Page::Chats | Page::Calls if app.open_chat.is_some() => Action::OpenChatSearch,
         _ => Action::FocusSearch,
     }
@@ -1135,8 +1138,8 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+0", "Reset zoom"),
     ("← / →", "Previous / next item in the media viewer"),
     ("? / Ctrl+/", "Keyboard shortcuts (? when not typing)"),
-    ("Ctrl+Shift+L", "Lock ZapFast (with an app lock password)"),
-    ("Ctrl+W", "Close the window (ZapFast remains in the tray)"),
+    ("Ctrl+Shift+L", "Lock Wassup (with an app lock password)"),
+    ("Ctrl+W", "Close the window (Wassup remains in the tray)"),
     ("Ctrl+Q", "Quit"),
 ];
 
@@ -1232,6 +1235,8 @@ mod tests {
         assert!(matches!(find_action(&app), Action::OpenChatSearch));
         app.page = Page::Settings;
         assert!(matches!(find_action(&app), Action::FocusSettingsSearch));
+        app.page = Page::Deleted;
+        assert!(matches!(find_action(&app), Action::FocusDeletedSearch));
         app.page = Page::Wallpaper;
         assert!(matches!(find_action(&app), Action::FocusSearch));
     }
@@ -1734,7 +1739,7 @@ mod tests {
     }
 
     /// Under the cropper, Enter on a focused button the reader can reach
-    /// presses that button, here one above the cropper, as ZapFast's own
+    /// presses that button, here one above the cropper, as Wassup's own
     /// window buttons are; with focus on a control under the cropper, such
     /// as the message field it was opened over, Enter keeps the crop.
     #[test]

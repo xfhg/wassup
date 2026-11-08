@@ -5,12 +5,31 @@
 //! English is both the source language and the fallback for any untranslated
 //! message. Only languages with a catalog are offered.
 
-pub use fastframe_i18n::{gettext, ngettext, pgettext};
+pub use fastframe_i18n::{ngettext, pgettext};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+
+/// Keeps the inherited translations usable after the private product rename.
+/// Only fixed UI templates pass through this function, before chat data is inserted.
+pub fn gettext<L: fastframe_i18n::Locale>(locale: L, source: &'static str) -> Cow<'static, str> {
+    let translated = fastframe_i18n::gettext(locale, source);
+    if translated != source || !source.contains("Wassup") {
+        return translated;
+    }
+    let Some(catalog) = locale.catalog() else {
+        return translated;
+    };
+    let inherited = source.replace("Wassup", "ZapFast");
+    Cow::Owned(
+        catalog
+            .translate(&inherited, None)
+            .replace("ZapFast", "Wassup"),
+    )
+}
 
 include!(concat!(env!("OUT_DIR"), "/catalogs.rs"));
 
-/// The interface languages ZapFast knows about.
+/// The interface languages Wassup knows about.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Locale {
     #[default]
@@ -252,6 +271,19 @@ mod tests {
         assert_eq!(gettext(Locale::English, "Chats"), "Chats");
         let missing = "A string nobody has translated";
         assert_eq!(gettext(Locale::PortugueseBrazil, missing), missing);
+        assert_eq!(gettext(Locale::German, missing), missing);
+    }
+
+    #[test]
+    fn renamed_templates_keep_the_inherited_translation_and_new_brand() {
+        let source =
+            "{caller} is calling {group}. Wassup can't join group calls yet: answer on your phone.";
+        assert_eq!(gettext(Locale::English, source), source);
+        assert_eq!(
+            gettext(Locale::German, source),
+            "{caller} ruft {group} an. Wassup kann Gruppenanrufen noch nicht beitreten: Nimm auf deinem Telefon ab."
+        );
+        let missing = "A new Wassup message without a translation";
         assert_eq!(gettext(Locale::German, missing), missing);
     }
 

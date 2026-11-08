@@ -17,7 +17,7 @@ pub type Catalog = fastframe_theme::Catalog<Palette>;
 pub const DESKTOP_THEMES: fastframe_theme::DesktopThemes = fastframe_theme::DesktopThemes {
     slug: "zapfast",
     omarchy_template: include_str!("../contrib/omarchy/zapfast.json.tpl"),
-    // Every template ZapFast shipped before, so an untouched copy installed
+    // Retained previous templates, so an untouched copy installed
     // by an older release is replaced with the current one.
     omarchy_previous_templates: &[include_str!(
         "../contrib/omarchy/previous/zapfast-1.json.tpl"
@@ -25,7 +25,7 @@ pub const DESKTOP_THEMES: fastframe_theme::DesktopThemes = fastframe_theme::Desk
     presets: true,
 };
 
-/// The shared palettes, as ZapFast reads them.
+/// The shared palettes, as Wassup reads them.
 pub fn presets() -> impl Iterator<Item = CustomTheme> {
     fastframe_theme::presets::themes::<Palette>()
 }
@@ -52,7 +52,7 @@ pub fn theme_status(status: fastframe_theme::Status) -> &'static str {
             "The Omarchy palette could not be loaded. Keeping the last usable appearance. See the log for details."
         }
         Status::Problem(Problem::LoaderFailed | _) => {
-            "Custom themes could not be loaded. Run zapfast reload-themes to try again."
+            "Custom themes could not be loaded. Run wassup reload-themes to try again."
         }
     }
 }
@@ -506,7 +506,7 @@ impl fastframe_theme::Palette for Palette {
     }
 
     /// Spotifast palettes share the sixteen interface colours. Derive the
-    /// chat-only colours when importing one, while keeping explicit ZapFast
+    /// chat-only colours when importing one, while keeping explicit Wassup
     /// overrides.
     fn derive(&mut self, given: &std::collections::BTreeSet<&str>) {
         if given.contains("window") && !given.contains("chat") {
@@ -882,7 +882,7 @@ pub fn apply_text_rendering_change(ctx: &egui::Context) -> bool {
 
 fastframe_icons::icons! {
     /// Every icon the interface draws. Icons Spotifast ships too come from
-    /// fastframe-icons (`lucide`); the rest are ZapFast's own files.
+    /// fastframe-icons (`lucide`); the rest are Wassup's own files.
     pub enum Icon {
         prefix: "zapfast-icon-",
         directory: "../assets/icons/",
@@ -1073,19 +1073,18 @@ pub fn circle_button(
     }
 }
 
-/// Draws the app's mark as it ships: the lit disc and the ink bubble of
-/// `packaging/icons/zapfast.svg`, rendered once per pixel size.
+/// Draws the supplied Wassup artwork, resized once per physical pixel size.
 pub fn mark(ui: &egui::Ui, center: egui::Pos2, diameter: f32) {
     let ctx = ui.ctx();
     let pixels = (diameter * ctx.pixels_per_point()).round().max(1.0) as usize;
-    let id = egui::Id::new(("zapfast-mark", pixels));
+    let id = egui::Id::new(("wassup-mark", pixels));
     let texture = match ctx.data_mut(|data| data.get_temp::<egui::TextureHandle>(id)) {
         Some(texture) => texture,
         None => {
             let rgba = crate::util::app_icon_rgba(pixels);
             let image = egui::ColorImage::from_rgba_unmultiplied([pixels, pixels], &rgba);
             let texture = ctx.load_texture(
-                format!("zapfast-mark-{pixels}"),
+                format!("wassup-mark-{pixels}"),
                 image,
                 egui::TextureOptions::LINEAR,
             );
@@ -1098,20 +1097,17 @@ pub fn mark(ui: &egui::Ui, center: egui::Pos2, diameter: f32) {
     ui.painter().image(texture.id(), rect, uv, Color32::WHITE);
 }
 
-/// Draws the logo's shape in two flat colours, for the empty conversation's
-/// faint watermark.
+/// A restrained W watermark, using the same glyph as the menu-bar template.
 pub fn logo(ui: &egui::Ui, center: egui::Pos2, diameter: f32, disc: Color32, glyph: Color32) {
-    ui.painter().circle_filled(center, diameter / 2.0, disc);
-    // Match `packaging/icons/zapfast-small.svg`: the bubble sits a little
-    // right of and above the centre, where its tail balances it.
-    let icon_size = diameter * 0.674;
-    let icon_rect = egui::Rect::from_center_size(
-        center + Vec2::new(diameter * 0.009, -diameter * 0.009),
-        Vec2::splat(icon_size),
-    );
-    Icon::MessageCircle
-        .image(glyph, icon_size)
-        .paint_at(ui, icon_rect);
+    let plate = egui::Rect::from_center_size(center, Vec2::splat(diameter * 0.88));
+    ui.painter().rect_filled(plate, diameter * 0.22, disc);
+    let glyph_rect = egui::Rect::from_center_size(center, Vec2::splat(diameter * 0.82));
+    egui::Image::from_bytes(
+        "bytes://wassup-brand-w.svg",
+        include_bytes!("../assets/brand/wassup-w.svg").as_slice(),
+    )
+    .tint(glyph)
+    .paint_at(ui, glyph_rect);
 }
 
 /// A button's label on one line. egui lays right-to-left text out in logical
@@ -1510,7 +1506,7 @@ pub fn preview_macos(ctx: &egui::Context) {
 
 /// Horizontal clearance for the window's buttons at the left of its top
 /// edge: the traffic lights on macOS, which do not scale with UI zoom, or the
-/// caption buttons ZapFast draws where the desktop puts them on the left.
+/// caption buttons Wassup draws where the desktop puts them on the left.
 pub fn traffic_light_inset(ctx: &egui::Context) -> f32 {
     if cfg!(target_os = "macos") {
         fastframe_titlebar::footprint(ctx, TOP_BAR_HEIGHT).left
@@ -1523,7 +1519,7 @@ pub fn traffic_light_inset(ctx: &egui::Context) -> f32 {
     }
 }
 
-/// Whether ZapFast draws the window's title bar itself: on Windows and
+/// Whether Wassup draws the window's title bar itself: on Windows and
 /// Linux when Settings > Appearance > Custom title bar is on
 /// (fastframe-titlebar), or in a layout test's preview of it.
 pub fn drawn_titlebar(ctx: &egui::Context) -> bool {
@@ -1539,13 +1535,13 @@ pub fn drawn_titlebar(ctx: &egui::Context) -> bool {
 }
 
 /// Whether the headers run to the window's top edge and share it with the
-/// window's buttons: macOS's hidden title bar, or the one ZapFast draws.
+/// window's buttons: macOS's hidden title bar, or the one Wassup draws.
 /// Status banners then go under the open chat's header, not across the top.
 pub fn chrome_in_headers(ctx: &egui::Context) -> bool {
     macos_chrome(ctx) || drawn_titlebar(ctx)
 }
 
-/// The room the caption buttons ZapFast draws take at each end of the top
+/// The room the caption buttons Wassup draws take at each end of the top
 /// edge, beside a header [`TOP_BAR_HEIGHT`] tall. Zero on macOS (the traffic
 /// lights are [`traffic_light_inset`]), under the desktop's own title bar,
 /// and in full screen.
@@ -1931,7 +1927,7 @@ mod tests {
         assert!(ratio >= 4.5, "hover contrast is only {ratio:.2}:1");
     }
 
-    /// Every colour ZapFast has can be set by name, including the chat
+    /// Every colour Wassup has can be set by name, including the chat
     /// colours Spotifast's palettes lack; explicit ones win over derived ones.
     #[test]
     fn palette_files_set_every_colour_and_keep_explicit_chat_colours() {
@@ -1980,7 +1976,7 @@ mod tests {
         );
     }
 
-    /// ZapFast's Omarchy template adds the chat colours to the base ones and
+    /// Wassup's Omarchy template adds the chat colours to the base ones and
     /// renders as Omarchy's own renderer does.
     #[test]
     fn the_omarchy_template_renders_like_omarchy_in_light_and_dark_themes() {

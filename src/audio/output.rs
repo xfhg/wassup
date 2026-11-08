@@ -15,7 +15,7 @@ use fastframe_audio::{Device, Maintained, Render};
 /// Plays a rodio mixer, made at the stream's rate and channel count.
 ///
 /// A stand-in for fastframe-audio's own `MixerRender` until its `rodio` feature follows rodio's
-/// newer line: that one mixes with rodio 0.21, and ZapFast's players and sources are rodio
+/// newer line: that one mixes with rodio 0.21, and Wassup's players and sources are rodio
 /// 0.22's, which cannot join a 0.21 mixer. Switch to it then; this is the same shape.
 ///
 /// A stream in the format the mixer already has keeps it, so a reopen on another device carries

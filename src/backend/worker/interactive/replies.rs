@@ -249,7 +249,7 @@ impl Worker {
             Some((row, reply))
         })();
         let Some((source, mut message)) = prepared else {
-            self.emit(Event::Error("This option is unavailable in ZapFast. Open the message in WhatsApp Web or on your phone.".into()));
+            self.emit(Event::Error("This option is unavailable in Wassup. Open the message in WhatsApp Web or on your phone.".into()));
             return;
         };
         let expiration = self.apply_ephemeral(&chat, &mut message);
@@ -282,6 +282,9 @@ impl Worker {
             forwarded: false,
             thumbnail: None,
         };
+        if !self.store_message(row, Some(message.encode_to_vec()), None) {
+            return;
+        }
         self.interactive_sending
             .insert((chat.clone(), source_id.clone()), id.clone());
         self.emit(Event::InteractiveReplyState {
@@ -289,8 +292,8 @@ impl Worker {
             message: source_id,
             pending: true,
         });
-        self.store_message(row, Some(message.encode_to_vec()), None);
         tokio::spawn(send_outgoing(
+            self.capture.clone(),
             client,
             self.commands.clone(),
             chat,

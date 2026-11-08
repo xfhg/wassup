@@ -5,7 +5,7 @@
 //!
 //! Both read the same entries, which come from WhatsApp's own records (the
 //! phone's call log and the call-log messages in history) and from the calls
-//! ZapFast took part in.
+//! Wassup took part in.
 
 use egui::{Align, Frame, Layout, Margin, Rect, Sense, Vec2, pos2, vec2};
 
@@ -670,7 +670,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 }
 
 /// The pane with no chat open: what WhatsApp shows there, a way to start a
-/// call, and what ZapFast's calls are.
+/// call, and what Wassup's calls are.
 fn start(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     let locale = app.locale;

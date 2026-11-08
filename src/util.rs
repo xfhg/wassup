@@ -765,20 +765,28 @@ pub fn hue(seed: &str) -> f32 {
     (hash % 360) as f32
 }
 
-/// Embedded SVG app logo used across platform surfaces.
-const MARK: &[u8] = include_bytes!("../packaging/icons/zapfast.svg");
-/// The same mark without its rim and shading, which blur below this size.
-const SMALL_MARK: &[u8] = include_bytes!("../packaging/icons/zapfast-small.svg");
-const SMALL_BELOW: usize = 40;
+/// A simple W stays recognizable at menu-bar sizes and as a flat watermark.
+const W_MARK: &[u8] = include_bytes!("../assets/brand/wassup-w.svg");
 
-/// Rasterizes the logo to straight-alpha RGBA.
+/// Resizes the supplied artwork without changing its colours or composition.
+/// Window, tray, linking, lock, Settings, and About marks share this source.
 pub fn app_icon_rgba(size: usize) -> Vec<u8> {
-    let mark = if size < SMALL_BELOW { SMALL_MARK } else { MARK };
-    match render_mark(mark, size) {
-        Some(rgba) => rgba,
-        // Fall back to an accent disc if the embedded SVG cannot render.
-        None => plain_disc(size),
+    if size == 0 {
+        return Vec::new();
     }
+    static ARTWORK: std::sync::OnceLock<image::RgbaImage> = std::sync::OnceLock::new();
+    let artwork = ARTWORK.get_or_init(|| {
+        image::load_from_memory(crate::branding::ICON_PNG)
+            .expect("the packaged Wassup icon is a valid PNG")
+            .into_rgba8()
+    });
+    image::imageops::resize(
+        artwork,
+        size as u32,
+        size as u32,
+        image::imageops::FilterType::Lanczos3,
+    )
+    .into_raw()
 }
 
 fn render_mark(mark: &[u8], size: usize) -> Option<Vec<u8>> {
@@ -803,36 +811,13 @@ fn render_mark(mark: &[u8], size: usize) -> Option<Vec<u8>> {
     )
 }
 
-fn plain_disc(size: usize) -> Vec<u8> {
-    let mut rgba = vec![0u8; size * size * 4];
-    let center = size as f32 / 2.0;
-    let radius = center - 2.0;
-    for y in 0..size {
-        for x in 0..size {
-            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
-            let distance = ((px - center).powi(2) + (py - center).powi(2)).sqrt();
-            let coverage = (radius - distance + 0.5).clamp(0.0, 1.0);
-            let index = (y * size + x) * 4;
-            rgba[index] = 0;
-            rgba[index + 1] = 168;
-            rgba[index + 2] = 132;
-            rgba[index + 3] = (coverage * 255.0) as u8;
-        }
-    }
-    rgba
-}
-
-/// Converts the logo to a monochrome macOS menu-bar template: the disc,
-/// with the bubble cut out of it.
+/// The rounded W as a monochrome macOS menu-bar template, on transparency.
 pub fn tray_template_rgba(size: usize) -> Vec<u8> {
-    // The flat mark at every size: a template has no room for shading.
-    let mut rgba = render_mark(SMALL_MARK, size).unwrap_or_else(|| plain_disc(size));
-    // The disc's green against the ink's says how much of a pixel is disc.
-    const INK: f32 = 14.0;
-    const DISC: f32 = 168.0;
+    if size == 0 {
+        return Vec::new();
+    }
+    let mut rgba = render_mark(W_MARK, size).expect("the packaged Wassup W is a valid SVG");
     for pixel in rgba.as_chunks_mut::<4>().0 {
-        let disc = ((f32::from(pixel[1]) - INK) / (DISC - INK)).clamp(0.0, 1.0);
-        pixel[3] = (f32::from(pixel[3]) * disc).round() as u8;
         pixel[0] = 0;
         pixel[1] = 0;
         pixel[2] = 0;
@@ -1202,12 +1187,12 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_icon_draws_without_svg_filters() {
+    fn the_monochrome_mark_draws_without_svg_filters() {
         // Qt's SVG renderer rejects filter primitives such as feFuncA, and a
         // tray that asks for the themed icon then draws a missing-icon
         // marker (#396).
-        let svg = std::str::from_utf8(MARK).expect("the icon is UTF-8");
-        assert!(!svg.contains("<filter"), "packaging/icons/zapfast.svg");
+        let svg = std::str::from_utf8(W_MARK).expect("the icon is UTF-8");
+        assert!(!svg.contains("<filter"), "assets/brand/wassup-w.svg");
     }
 
     #[test]
@@ -1433,8 +1418,8 @@ mod tests {
         assert_eq!(icon[middle + 3], 255);
     }
 
-    /// The menu-bar template is the disc with the bubble cut out: solid in
-    /// the bubble's middle, clear along its outline and outside the disc.
+    /// The unread compositor keeps distinct counts and a legible 9+ badge
+    /// on both the full-colour artwork and the monochrome W template.
     #[test]
     fn the_tray_icon_counts_unread_chats_up_to_nine_and_more() {
         use super::{app_icon_rgba, tray_icons, tray_template_rgba};
@@ -1470,15 +1455,16 @@ mod tests {
     }
 
     #[test]
-    fn the_tray_template_cuts_the_bubble_out_of_the_disc() {
+    fn the_tray_template_is_a_monochrome_w_on_transparency() {
         let size = 64;
         let template = tray_template_rgba(size);
         let alpha = |x: usize, y: usize| template[(y * size + x) * 4 + 3];
         assert_eq!(alpha(0, 0), 0);
-        assert_eq!(alpha(32, 32), 255, "inside the bubble is disc");
-        assert_eq!(alpha(32, 4), 255, "so is the rim above it");
-        let outline = (0..32).map(|y| alpha(32, y)).min().unwrap();
-        assert!(outline < 40, "the outline is cut out: {outline}");
+        assert_eq!(alpha(32, 2), 0, "the W has no background plate");
+        assert_eq!(alpha(32, 21), 255, "the central peak is present");
+        assert_eq!(alpha(21, 46), 255, "the first rounded valley is present");
+        assert_eq!(alpha(43, 46), 255, "the second rounded valley is present");
+        assert_eq!(alpha(32, 42), 0, "the space between valleys stays clear");
         assert!(
             template
                 .as_chunks::<4>()
@@ -1488,11 +1474,16 @@ mod tests {
         );
     }
 
-    /// Both marks render, the large one with its filters.
+    /// Full-colour surfaces use the exact supplied PNG at native resolution;
+    /// the separate template is deliberately a legible one-colour W.
     #[test]
-    fn both_marks_render() {
-        assert!(render_mark(MARK, 128).is_some());
-        assert!(render_mark(SMALL_MARK, 22).is_some());
+    fn supplied_artwork_and_monochrome_mark_render() {
+        let source = image::load_from_memory(crate::branding::ICON_PNG)
+            .unwrap()
+            .into_rgba8();
+        assert_eq!(source.dimensions(), (1024, 1024));
+        assert_eq!(app_icon_rgba(1024), source.into_raw());
+        assert!(render_mark(W_MARK, 22).is_some());
     }
 }
 

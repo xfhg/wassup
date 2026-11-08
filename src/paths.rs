@@ -1,4 +1,4 @@
-//! Where ZapFast keeps its files.
+//! Where Wassup keeps its independent files.
 //!
 //! Configuration, session state, and caches use separate standard platform
 //! directories. Clearing a cache does not remove device keys.
@@ -20,15 +20,15 @@ pub struct AppDirs {
 
 impl AppDirs {
     pub fn discover() -> Self {
-        match Self::of("zapfast") {
+        match Self::of("wassup") {
             Some(dirs) => dirs,
             None => {
                 let fallback = std::env::current_dir().unwrap_or_default();
                 Self {
-                    config: fallback.join("zapfast-config"),
-                    state: fallback.join("zapfast-state"),
-                    cache: fallback.join("zapfast-cache"),
-                    runtime: fallback.join("zapfast-run"),
+                    config: fallback.join("wassup-config"),
+                    state: fallback.join("wassup-state"),
+                    cache: fallback.join("wassup-cache"),
+                    runtime: fallback.join("wassup-run"),
                 }
             }
         }
@@ -36,7 +36,7 @@ impl AppDirs {
 
     /// Standard platform directories for the app.
     fn of(name: &str) -> Option<Self> {
-        let project = ProjectDirs::from("me", "paolino", name)?;
+        let project = ProjectDirs::from("local", "", name)?;
         let state = project
             .state_dir()
             .map(|path| path.to_path_buf())
@@ -49,22 +49,9 @@ impl AppDirs {
         })
     }
 
-    /// Adopts earlier names, newest first, without replacing existing data.
-    /// Call only after acquiring the instance guard, and never for demo runs.
-    pub fn adopt_previous_names(&self) -> std::io::Result<()> {
-        for name in ["fastsapp", "fastwhatsapp"] {
-            if let Some(old) = Self::of(name) {
-                self.adopt(&old)?;
-            }
-            if let (Some(from), Some(to)) =
-                (eframe::storage_dir(name), eframe::storage_dir("zapfast"))
-            {
-                adopt_directory(&from, &to)?;
-            }
-        }
-        Ok(())
-    }
-
+    // Migration helpers are fixture-only: this private build must never adopt
+    // another application's profiles.
+    #[cfg(test)]
     fn adopt(&self, old: &Self) -> std::io::Result<()> {
         for (from, to) in [
             (&old.config, &self.config),
@@ -162,7 +149,7 @@ impl AppDirs {
         if !pending.is_empty() && dest.session_db().exists() {
             log::warn!(
                 "single-account files beside a linked account folder are left alone: an older \
-                 ZapFast may still be installed"
+                 Wassup may still be installed"
             );
             return Ok(());
         }
@@ -204,7 +191,7 @@ impl AppDirs {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
                 format!(
-                    "{} holds a single-account setup, but {} already exists. Nothing was moved; move one of them away and start ZapFast again",
+                    "{} holds a single-account setup, but {} already exists. Nothing was moved; move one of them away and start Wassup again",
                     self.state.display(),
                     blocked[0].display()
                 ),
@@ -242,7 +229,7 @@ impl AppDirs {
 
     /// Current-run log, replaced at startup.
     pub fn log_file(&self) -> PathBuf {
-        self.state.join("zapfast.log")
+        self.state.join("wassup.log")
     }
 
     /// Panic log written before process exit.
@@ -270,7 +257,7 @@ impl AppDirs {
         self.state.join("stickers")
     }
 
-    /// ZapFast's copy of the chosen chat wallpaper image. User data, so it
+    /// Wassup's copy of the chosen chat wallpaper image. User data, so it
     /// sits beside saved stickers rather than in the cache.
     pub fn wallpaper_file(&self, extension: &str) -> PathBuf {
         self.state.join(format!("wallpaper.{extension}"))
@@ -356,7 +343,7 @@ impl AccountDirs {
         self.state.join("stickers")
     }
 
-    /// ZapFast's copy of the chosen chat wallpaper image for this account.
+    /// Wassup's copy of the chosen chat wallpaper image for this account.
     pub fn wallpaper_file(&self, extension: &str) -> PathBuf {
         self.state.join(format!("wallpaper.{extension}"))
     }
@@ -430,6 +417,21 @@ fn adopt_directory(from: &Path, to: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn private_profile_and_runtime_do_not_share_zapfast_paths() {
+        let dirs = AppDirs::discover();
+        let upstream = ProjectDirs::from("me", "paolino", "zapfast").unwrap();
+        assert!(
+            dirs.state
+                .ends_with("Library/Application Support/local.wassup")
+        );
+        assert!(dirs.cache.ends_with("Library/Caches/local.wassup"));
+        assert!(dirs.runtime.ends_with("local.wassup.run"));
+        assert_ne!(dirs.state, upstream.data_local_dir());
+        assert_ne!(dirs.cache, upstream.cache_dir());
+    }
 
     fn root(name: &str) -> PathBuf {
         let root =

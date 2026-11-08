@@ -36,12 +36,12 @@ pub enum Script {
     /// The 41-second launch tour: search, replies, GIFs, stickers, themes.
     #[default]
     Launch,
-    /// What ZapFast 0.16 added, about 90 seconds.
+    /// A tour of chat and media features, about 90 seconds.
     WhatsNew,
     /// A one-to-one video call, a voice call answered, and a group's video
     /// call, about 40 seconds.
     Calls,
-    /// What ZapFast 0.21 added, about 45 seconds.
+    /// A tour of newer interface features, about 45 seconds.
     WhatsNew21,
 }
 
@@ -117,7 +117,10 @@ pub fn prepare(app: &mut App) {
         .get_mut(super::SAMPLES[0].id)
         .and_then(|chat| chat.message_mut("ada-link"))
     {
-        row.content = Content::text("The desktop app is ready! https://zapfast.rocks");
+        row.content = Content::text(format!(
+            "The desktop app is ready! {}",
+            crate::branding::PROFILE_URL
+        ));
         row.thumbnail = None;
         let summary = row.summary();
         if let Some(last) = app.chats.first_mut().and_then(|chat| chat.last.as_mut()) {

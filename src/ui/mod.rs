@@ -8,6 +8,7 @@ pub mod calls;
 mod chat_export;
 pub mod chats;
 pub mod conversation;
+pub mod deleted;
 pub mod dialogs;
 pub(crate) mod focus;
 mod glass;
@@ -87,6 +88,19 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     // The open chat's composer records its rect again below, if there is one.
     ctx.data_mut(|data| data.remove::<egui::Rect>(composer_rect_id()));
     titlebar_strip(app, ui);
+    if app.accounts.iter().any(|account| {
+        account
+            .capture_status
+            .as_ref()
+            .is_some_and(|status| status.paused)
+    }) {
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(
+                egui::Color32::from_rgb(190, 45, 45),
+                "Capture paused. Check the permanent archive in Settings > Files.",
+            );
+        });
+    }
     if !app.is_linked() {
         login::show(app, ui);
         accounts::corner(app, ctx);
@@ -137,7 +151,7 @@ fn list_pane_only(app: &App) -> bool {
     match app.page {
         Page::Chats => app.current_chat().is_none(),
         Page::Calls => app.current_chat().is_none() || !app.call_picked(),
-        Page::Settings | Page::Wallpaper => false,
+        Page::Settings | Page::Wallpaper | Page::Deleted => false,
     }
 }
 
@@ -160,21 +174,31 @@ fn main_view(app: &mut App, ui: &mut egui::Ui, list_only: bool) {
     // too little room for it and the conversation, the list and the rail
     // step aside while the panel is open. The Calls tab's history needs the
     // full list pane: only the chats collapse into the rail's avatars.
-    let full_list = app.sidebar_mode() == SidebarDisplayMode::Expanded || app.page == Page::Calls;
+    let full_list = app.page != Page::Deleted
+        && (app.sidebar_mode() == SidebarDisplayMode::Expanded || app.page == Page::Calls);
     let mut list_width = chats::compact_width(ui.ctx());
     if full_list {
         list_width += app.settings.sidebar_width;
     }
-    let crowded = app.info_visible()
+    let crowded = app.page != Page::Deleted
+        && app.info_visible()
         && ui.available_width() - list_width < pane::INFO_MIN + pane::INFO_CONVERSATION_MIN;
     if !narrow(ui.ctx()) && !crowded {
-        rail::show(app, ui, !full_list);
+        rail::show(app, ui, !full_list && app.page != Page::Deleted);
         if full_list {
             chats::show(app, ui);
         }
     }
-    let search_overlay = pane::show(app, ui);
-    let info_overlay = info::show(app, ui);
+    let search_overlay = if app.page == Page::Deleted {
+        None
+    } else {
+        pane::show(app, ui)
+    };
+    let info_overlay = if app.page == Page::Deleted {
+        None
+    } else {
+        info::show(app, ui)
+    };
     egui::CentralPanel::default()
         .frame(central_frame(app))
         .show(ui, |ui| {
@@ -187,6 +211,7 @@ fn main_view(app: &mut App, ui: &mut egui::Ui, list_only: bool) {
             );
             match app.page {
                 Page::Settings => settings::show(app, ui),
+                Page::Deleted => deleted::show(app, ui),
                 Page::Chats => conversation::show(app, ui),
                 // The open chat stays beside the call history.
                 Page::Calls if app.current_chat().is_some() => conversation::show(app, ui),
@@ -551,7 +576,7 @@ fn drop_target(app: &mut App, ctx: &egui::Context) {
 }
 
 /// Connection and history-sync banner.
-/// What the banner needs beside the caption buttons ZapFast draws: its line
+/// What the banner needs beside the caption buttons Wassup draws: its line
 /// and a button.
 const BANNER_MIN_CONTENT: f32 = 320.0;
 
@@ -576,7 +601,7 @@ fn banner(app: &mut App, ui: &mut egui::Ui) {
             let update = update.as_ref().expect("checked above");
             (
                 Icon::Info,
-                crate::i18n::gettext(app.locale, "ZapFast {version} is available")
+                crate::i18n::gettext(app.locale, "Wassup {version} is available")
                     .replace("{version}", &update.version),
                 palette.accent,
                 false,
@@ -624,7 +649,7 @@ fn banner(app: &mut App, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             // Over a page with no header (Settings, or no chat open) the
             // banner takes the top-right corner from the caption buttons
-            // ZapFast draws, beside them or under them.
+            // Wassup draws, beside them or under them.
             let room = caption_room(ui.ctx(), ui.max_rect(), BANNER_MIN_CONTENT);
             caption_drag(ui, ui.max_rect().with_max_y(ui.max_rect().top() + room.top));
             ui.add_space(room.top);
@@ -801,7 +826,7 @@ fn toasts(app: &mut App, ctx: &egui::Context) {
 
 /// Draggable space across the top of the linking and lock screens, which
 /// have no header: for the macOS traffic lights, or for the caption buttons
-/// ZapFast draws.
+/// Wassup draws.
 fn titlebar_strip(app: &App, ui: &mut egui::Ui) {
     let linked = app.is_linked() && !app.app_lock.is_locked();
     if linked {
@@ -836,7 +861,7 @@ pub fn titlebar_drag(ui: &mut egui::Ui, rect: egui::Rect) {
     fastframe_titlebar::drag(ui, rect);
 }
 
-/// Makes `rect` drag the window while ZapFast draws the title bar, for the
+/// Makes `rect` drag the window while Wassup draws the title bar, for the
 /// places macOS leaves to its own title bar strip: the pages, the panels at
 /// the right, and the screens over the window. Call it before the widgets
 /// inside `rect`, so they keep their clicks.
@@ -846,7 +871,7 @@ pub(crate) fn caption_drag(ui: &mut egui::Ui, rect: egui::Rect) {
     }
 }
 
-/// Where a header's own widgets go beside the caption buttons ZapFast draws
+/// Where a header's own widgets go beside the caption buttons Wassup draws
 /// (see [`caption_room`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct CaptionRoom {
@@ -860,7 +885,7 @@ pub(crate) struct CaptionRoom {
 }
 
 /// The room a header laid out in `rect` leaves for the caption buttons
-/// ZapFast draws over the window's top corners. Only a header that reaches
+/// Wassup draws over the window's top corners. Only a header that reaches
 /// a corner shares it: the buttons' room at that end, less what already
 /// separates the header from the window's edge. A header whose own widgets
 /// need `min_content` beside the buttons and do not get it goes under them
@@ -898,7 +923,7 @@ pub(crate) fn caption_room(ctx: &egui::Context, rect: egui::Rect, min_content: f
     }
 }
 
-/// The caption buttons ZapFast draws, over the window's top corners and
+/// The caption buttons Wassup draws, over the window's top corners and
 /// above everything else in it, and the resizable edges, while the custom
 /// title bar is on (Windows and Linux).
 fn window_chrome(app: &App, ui: &mut egui::Ui) {

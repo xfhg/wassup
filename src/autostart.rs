@@ -1,4 +1,4 @@
-//! Starting ZapFast in the tray when the person logs in, through
+//! Starting Wassup in the tray when the person logs in, through
 //! fastframe-autostart.
 //!
 //! The platform's own login-item record is the only state: Settings reads it
@@ -11,7 +11,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use fastframe_autostart::{Autostart, Start, State};
 
 fn autostart() -> Autostart {
-    Autostart::new("zapfast", "ZapFast")
+    Autostart::new("wassup", "Wassup")
 }
 
 /// What a finished read or change found.
@@ -22,6 +22,8 @@ pub struct Outcome {
     pub state: Result<State, String>,
     /// Whether the person asked for the change, rather than a read at start.
     pub changed: bool,
+    /// The requested value, or `None` for a status read.
+    pub requested: Option<bool>,
 }
 
 /// The one read or change of the login item in flight.
@@ -31,22 +33,19 @@ pub struct LoginItem {
 }
 
 impl LoginItem {
-    /// Reads the login item, after moving an older macOS registration over.
+    /// Reads only this application bundle's login item.
     pub fn read(&mut self, wake: impl Fn() + Send + 'static) {
         self.spawn(
-            move || {
-                #[cfg(target_os = "macos")]
-                move_launch_agent();
-                Outcome {
-                    state: Ok(autostart().state()),
-                    changed: false,
-                }
+            move || Outcome {
+                state: Ok(autostart().state()),
+                changed: false,
+                requested: None,
             },
             wake,
         );
     }
 
-    /// Starts ZapFast in the tray at login, or not at all.
+    /// Starts Wassup in the tray at login, or not at all.
     pub fn set(&mut self, enabled: bool, wake: impl Fn() + Send + 'static) {
         self.spawn(
             move || Outcome {
@@ -54,6 +53,7 @@ impl LoginItem {
                     .set(enabled.then_some(Start::Hidden))
                     .map_err(|error| error.to_string()),
                 changed: true,
+                requested: Some(enabled),
             },
             wake,
         );
@@ -103,25 +103,25 @@ pub fn switch(state: State) -> Option<bool> {
     }
 }
 
-/// ZapFast 0.19 and earlier wrote their own LaunchAgent. Registers the bundled
-/// agent in its place and deletes the old file, once; a copy that cannot
-/// register (one run outside its bundle) leaves the file as it is.
-#[cfg(target_os = "macos")]
-fn move_launch_agent() {
-    let Some(home) = std::env::var_os("HOME") else {
-        return;
-    };
-    let old = std::path::Path::new(&home).join("Library/LaunchAgents/me.paolino.zapfast.plist");
-    if !old.is_file() {
-        return;
+/// One initial registration attempt, while respecting a later explicit disable.
+#[derive(Debug, PartialEq, Eq)]
+pub enum InitialSetup {
+    Enable,
+    Remember,
+    Wait,
+}
+
+pub fn initial_setup(complete: bool, state: State, requested: Option<bool>) -> InitialSetup {
+    if complete {
+        return InitialSetup::Wait;
     }
-    match autostart().set(Some(Start::Hidden)) {
-        Ok(_) => {
-            if let Err(error) = std::fs::remove_file(&old) {
-                log::warn!("could not remove the old login item: {error}");
-            }
-        }
-        Err(error) => log::info!("the old login item stays: {error}"),
+    match state {
+        State::On(_) | State::NeedsApproval(_) => InitialSetup::Remember,
+        // A confirmed explicit disable is also a completed user choice.
+        State::Off if requested == Some(false) => InitialSetup::Remember,
+        State::Off if requested.is_none() => InitialSetup::Enable,
+        // Unsupported/unconfirmed registration is retried at a later launch.
+        State::Off | State::Unsupported => InitialSetup::Wait,
     }
 }
 
@@ -136,5 +136,31 @@ mod tests {
         assert_eq!(switch(State::On(Start::Hidden)), Some(true));
         assert_eq!(switch(State::NeedsApproval(Start::Hidden)), Some(true));
         assert_eq!(switch(State::On(Start::Window)), Some(true));
+    }
+
+    #[test]
+    fn first_launch_registers_once_and_respects_a_confirmed_disable() {
+        assert_eq!(initial_setup(false, State::Off, None), InitialSetup::Enable);
+        assert_eq!(
+            initial_setup(false, State::On(Start::Hidden), Some(true)),
+            InitialSetup::Remember
+        );
+        assert_eq!(
+            initial_setup(false, State::NeedsApproval(Start::Hidden), Some(true)),
+            InitialSetup::Remember
+        );
+        assert_eq!(
+            initial_setup(false, State::Unsupported, None),
+            InitialSetup::Wait
+        );
+        assert_eq!(
+            initial_setup(false, State::Off, Some(true)),
+            InitialSetup::Wait
+        );
+        assert_eq!(
+            initial_setup(false, State::Off, Some(false)),
+            InitialSetup::Remember
+        );
+        assert_eq!(initial_setup(true, State::Off, None), InitialSetup::Wait);
     }
 }

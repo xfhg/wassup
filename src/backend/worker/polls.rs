@@ -366,6 +366,19 @@ impl Worker {
             return;
         };
         let draft = draft.unwrap();
+        let request = format!("poll-{}", jiff::Timestamp::now().as_nanosecond());
+        let text = std::iter::once(draft.question.as_str())
+            .chain(draft.options.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !self.capture_action("poll_requested", &chat, &request, text, Vec::new()) {
+            self.emit(Event::PollCreated {
+                chat,
+                error: Some("Capture paused. The poll was not sent.".into()),
+            });
+            return;
+        }
+        let capture = self.capture.clone();
         let commands = self.commands.clone();
         tokio::spawn(async move {
             let result = async {
@@ -405,6 +418,19 @@ impl Worker {
             }
             .await
             .map_err(str::to_owned);
+            if let Some(capture) = capture {
+                let (kind, text) = match &result {
+                    Ok(created) => ("poll_accepted", format!("Message ID: {}", created.id)),
+                    Err(_) => ("poll_uncertain", String::new()),
+                };
+                let _ = capture.record_event(super::capture_bridge::action_event(
+                    kind,
+                    &chat,
+                    &request,
+                    text,
+                    Vec::new(),
+                ));
+            }
             let _ = commands.send(Command::PollCreated {
                 chat,
                 draft,
@@ -477,6 +503,9 @@ impl Worker {
         let raw = creation_archive(&row.content, &created.secret).encode_to_vec();
         let _ = self.archive.mark_poll_history(&chat, &row.id);
         self.poll_history.finish(&chat, &row.id);
+        if !self.capture_outgoing(&row, &raw) {
+            return;
+        }
         self.store_message(row, Some(raw), None);
         if ChatKind::from_id(&chat) == ChatKind::Group {
             self.save_group_recipients(&chat, &created.id, &created.recipients);

@@ -1,4 +1,4 @@
-//! Pauses other apps' music while ZapFast records or plays audio, and
+//! Pauses other apps' music while Wassup records or plays audio, and
 //! resumes it afterwards.
 //!
 //! Callers take a [`Hold`] for as long as they need quiet. The first hold
@@ -17,7 +17,7 @@
 //! `playerctl --player <name> play` fails silently when the name has gone,
 //! which left music paused. Windows uses the system media transport controls.
 //! macOS has no public API for other apps' playback, so holds do nothing
-//! there; ZapFast does not use the private MediaRemote framework.
+//! there; Wassup does not use the private MediaRemote framework.
 
 use std::sync::mpsc;
 use std::sync::{Mutex, MutexGuard};
@@ -138,7 +138,7 @@ fn pausable_player(bus_name: &str) -> bool {
         return false;
     };
     // playerctld forwards to the real players, which are paused directly;
-    // going through it too would pause one of them twice. ZapFast does not
+    // going through it too would pause one of them twice. Wassup does not
     // publish MPRIS today, but must never pause itself if it starts to.
     let app = player.split('.').next().unwrap_or_default();
     !player.is_empty() && app != "playerctld" && app != "zapfast"

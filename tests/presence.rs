@@ -11,7 +11,7 @@
 //! whatsapp-rust exposes no wire-level test hook (its capturing transports
 //! are crate-internal), so the assertions sit at the client surface: the
 //! policy the lifecycle consults before every automatic announcement, and
-//! the validation outcome of the explicit announcements zapfast sends.
+//! the validation outcome of the explicit announcements wassup sends.
 
 use whatsapp_rust::features::{PresenceError, PresencePolicy};
 use whatsapp_rust::prelude::Bot;

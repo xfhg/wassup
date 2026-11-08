@@ -1,8 +1,8 @@
-//! Stars made before ZapFast followed them.
+//! Stars made before Wassup followed them.
 //!
 //! A star lives in the phone's RegularHigh app-state collection, and an
 //! incremental sync brings only what changed since the last one. Stars made
-//! before ZapFast 0.20 kept them were consumed by earlier syncs and never come
+//! before this client kept them were consumed by earlier syncs and never come
 //! again, so the Starred list showed only stars made since (#604). Rebuilding
 //! RegularHigh once from a snapshot replays every star as a full-sync
 //! `StarUpdate`, which the archive files like any other (a replayed star never
@@ -15,7 +15,7 @@ use super::*;
 pub(super) const STARS_RECOVERED: &str = "stars_recovered_v1";
 
 impl Worker {
-    /// Replays the phone's stars once, so stars made before ZapFast followed
+    /// Replays the phone's stars once, so stars made before Wassup followed
     /// them reach the Starred list.
     pub(super) fn recover_stars(&mut self) {
         if self.stars_recovered

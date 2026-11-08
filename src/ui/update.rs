@@ -22,7 +22,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         .corner_radius(CornerRadius::same(theme::RADIUS + 4))
         .inner_margin(Margin::same(22))
         .shadow(palette.modal_shadow());
-    egui::Window::new(crate::i18n::gettext(locale, "Update ZapFast"))
+    egui::Window::new(crate::i18n::gettext(locale, "Update Wassup"))
         .id(egui::Id::new("zapfast-update"))
         .title_bar(false)
         .resizable(false)
@@ -35,7 +35,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             ui.horizontal(|ui| {
                 theme::text(
                     ui,
-                    crate::i18n::gettext(locale, "Update ZapFast"),
+                    crate::i18n::gettext(locale, "Update Wassup"),
                     theme::bold(20.0),
                     palette.text,
                 );
@@ -110,7 +110,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         egui::Label::new(
                             RichText::new(crate::i18n::gettext(
                                 locale,
-                                "Finish any unsent messages or recordings before restarting. ZapFast will briefly disconnect, then reconnect automatically.",
+                                "Finish any unsent messages or recordings before restarting. Wassup will briefly disconnect, then reconnect automatically.",
                             ))
                             .font(theme::regular(14.0))
                             .color(palette.secondary),

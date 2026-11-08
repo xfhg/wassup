@@ -1,17 +1,11 @@
-//! The update flags reach fastframe-update before anything else in `main`.
-//!
-//! The previous release's helper runs the installed executable as
-//! `zapfast --apply-update <job>` and relaunches the new one with
-//! `--update-receipt <job>` or `--update-error <message>`. Those must be
-//! handled before the command line is parsed, before the single-instance
-//! lock, and before any directory, log or setting is touched.
+//! Wassup rejects upstream update-helper arguments before touching any profile.
 
 use std::path::Path;
 use std::process::{Command, Output};
 
 /// Runs the built executable with every per-user location inside `home`.
-fn zapfast(home: &Path, arguments: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_zapfast"));
+fn wassup(home: &Path, arguments: &[&str]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_wassup"));
     command.args(arguments).env_remove("RUST_LOG");
     for variable in [
         "HOME",
@@ -26,7 +20,7 @@ fn zapfast(home: &Path, arguments: &[&str]) -> Output {
     ] {
         command.env(variable, home);
     }
-    command.output().expect("the zapfast executable runs")
+    command.output().expect("the Wassup executable runs")
 }
 
 fn entries(directory: &Path) -> Vec<String> {
@@ -37,42 +31,27 @@ fn entries(directory: &Path) -> Vec<String> {
 }
 
 #[test]
-fn apply_update_runs_the_helper_before_anything_else() {
-    let home = tempfile::tempdir().unwrap();
-    let job = home.path().join("missing").join("handoff.json");
-    let output = zapfast(home.path(), &["--apply-update", job.to_str().unwrap()]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    // The helper reports a job it cannot read and exits with 1; clap would
-    // have rejected the unknown flag with 2 and its usage text.
-    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
-    assert!(!stderr.contains("Usage"), "stderr: {stderr}");
-    assert!(!stderr.is_empty());
-    // No directory, lock, log or setting was created on the way.
-    assert_eq!(entries(home.path()), Vec::<String>::new());
+fn updater_arguments_are_rejected_without_touching_the_profile() {
+    for argument in ["--apply-update", "--update-receipt", "--update-error"] {
+        let home = tempfile::tempdir().unwrap();
+        let output = wassup(home.path(), &[argument, "fixture"]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "stderr: {stderr}");
+        assert!(stderr.contains("unexpected argument"), "stderr: {stderr}");
+        assert_eq!(entries(home.path()), Vec::<String>::new());
+    }
 }
 
 #[test]
-fn update_receipt_and_error_are_taken_off_the_command_line() {
+fn version_identifies_the_private_executable_without_touching_the_profile() {
     let home = tempfile::tempdir().unwrap();
-    let job = home.path().join("handoff.json");
-    let output = zapfast(
-        home.path(),
-        &[
-            "--update-receipt",
-            job.to_str().unwrap(),
-            "--update-error",
-            "The update could not start. The previous version has been restored.",
-            "--version",
-        ],
-    );
+    let output = wassup(home.path(), &["--version"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // The helper of every earlier release checks this exact answer.
     assert!(output.status.success(), "stderr: {stderr}");
     assert_eq!(
         stdout.trim(),
-        format!("zapfast {}", env!("CARGO_PKG_VERSION")),
-        "stderr: {stderr}"
+        format!("wassup {}", env!("CARGO_PKG_VERSION"))
     );
     assert_eq!(entries(home.path()), Vec::<String>::new());
 }

@@ -215,7 +215,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     super::banner(app, ui);
     let palette = app.palette;
     let locale = app.locale;
-    // The caption buttons ZapFast draws, beside the column's title row when
+    // The caption buttons Wassup draws, beside the column's title row when
     // it reaches the top-right corner, or above it when the window is narrow.
     // Measured where the row stands unscrolled, so scrolling moves it away.
     let page = ui.max_rect();
@@ -303,7 +303,7 @@ const COLUMN_WIDTH: f32 = 640.0;
 const SIDE_MARGIN: f32 = 32.0;
 /// Space above and below the settings column.
 const TOP_MARGIN: f32 = 24.0;
-/// What the title row needs beside the caption buttons ZapFast draws: Back
+/// What the title row needs beside the caption buttons Wassup draws: Back
 /// and the title.
 const TITLE_MIN_CONTENT: f32 = 220.0;
 
@@ -413,13 +413,13 @@ fn sections(app: &App) -> Vec<Section> {
         },
     );
     appearance.row(translated(locale, "Language"), "", language_picker);
-    // macOS keeps its own traffic lights over ZapFast's headers.
+    // macOS keeps its own traffic lights over Wassup's headers.
     if cfg!(any(windows, target_os = "linux")) {
         appearance.row(
             translated(locale, "Custom title bar"),
             translated(
                 locale,
-                "Draw ZapFast's own title bar and window buttons instead of the desktop's.",
+                "Draw Wassup's own title bar and window buttons instead of the desktop's.",
             ),
             custom_titlebar_switch,
         );
@@ -435,7 +435,7 @@ fn sections(app: &App) -> Vec<Section> {
         translated(locale, "Download files automatically"),
         translated(
             locale,
-            "Files up to 64 MiB download as they come into view.",
+            "Downloads chat previews up to 64 MiB as they come into view. Permanent archive downloads run independently.",
         ),
         |settings| &mut settings.auto_download,
     );
@@ -612,7 +612,7 @@ fn sections(app: &App) -> Vec<Section> {
     let note = if app.account_privacy.fetch_failed {
         Some(crate::i18n::gettext(
             locale,
-            "Could not load your account privacy. Trying again when ZapFast reconnects.",
+            "Could not load your account privacy. Trying again when Wassup reconnects.",
         ))
     } else if !app.is_connected() {
         Some(crate::i18n::gettext(
@@ -696,22 +696,6 @@ fn sections(app: &App) -> Vec<Section> {
             },
         );
     }
-    system.toggle(
-        translated(locale, "Check for updates"),
-        translated(
-            locale,
-            "Asks GitHub once a day, sending only the ZapFast version.",
-        ),
-        |settings| &mut settings.check_for_updates,
-    );
-    system.toggle(
-        translated(locale, "Download updates automatically"),
-        translated(
-            locale,
-            "You still choose when to restart. Package managers and Flatpak update ZapFast themselves.",
-        ),
-        |settings| &mut settings.download_updates_automatically,
-    );
     let environment = app
         .settings
         .proxy
@@ -729,7 +713,7 @@ fn sections(app: &App) -> Vec<Section> {
         }
         None => translated(
             locale,
-            "For WhatsApp, media, and updates. Empty uses ALL_PROXY or HTTPS_PROXY.",
+            "For WhatsApp and media. Empty uses ALL_PROXY or HTTPS_PROXY.",
         ),
     };
     system.row(translated(locale, "Proxy"), description, move |ui, app| {
@@ -794,6 +778,62 @@ fn sections(app: &App) -> Vec<Section> {
     );
 
     let mut files = Section::new(translated(locale, "Files"));
+    let capture = app.capture_status.clone();
+    let root = capture
+        .as_ref()
+        .map(|status| status.root.clone())
+        .unwrap_or_else(crate::capture::default_root);
+    let description = match &capture {
+        Some(status) if status.paused => format!(
+            "Capture paused. {}",
+            status
+                .error
+                .as_deref()
+                .unwrap_or("Check storage permissions and free space.")
+        ),
+        Some(status) => {
+            let last = status
+                .last_saved_at
+                .and_then(|time| jiff::Timestamp::from_second(time).ok())
+                .map(|time| time.to_string())
+                .unwrap_or_else(|| "No messages saved yet".into());
+            let connection = if app.link.is_connected() {
+                "Capturing"
+            } else {
+                "Waiting for connection"
+            };
+            format!(
+                "{connection}. Last saved: {last}. Attachments: {} queued, {} downloading, {} saved, {} failed, {} oversized.{}",
+                status.queued,
+                status.downloading,
+                status.saved,
+                status.failed,
+                status.oversized,
+                status
+                    .markdown_error
+                    .as_deref()
+                    .map(|error| format!(" Readable files need attention: {error}"))
+                    .unwrap_or_default()
+            )
+        }
+        None => {
+            "Capture is starting. New messages are saved while Wassup is running and connected."
+                .into()
+        }
+    };
+    files.row("Permanent archive", description, move |ui, app| {
+        if theme::soft_button(
+            ui,
+            &palette,
+            Some(Icon::ExternalLink),
+            "Open archive",
+            false,
+        )
+        .clicked()
+        {
+            app.actions.push(Action::OpenFolder(root));
+        }
+    });
     // The account on screen: each number keeps its own archive and media.
     let state = app.account().dirs.state.clone();
     let open_folder = crate::i18n::gettext(locale, "Open folder");
@@ -884,7 +924,7 @@ fn sections(app: &App) -> Vec<Section> {
     let mut about_section = Section::new(translated(locale, "About"));
     about_section.block(
         vec![
-            "ZapFast".into(),
+            "Wassup".into(),
             translated(locale, "Keyboard shortcuts"),
             translated(locale, "Source code"),
         ],
@@ -903,7 +943,7 @@ fn sections(app: &App) -> Vec<Section> {
     ]
 }
 
-/// The app lock: a password, how long ZapFast may go unused, and the form
+/// The app lock: a password, how long Wassup may go unused, and the form
 /// that sets, changes, or removes the password.
 fn app_lock_rows(app: &App, privacy: &mut Section) {
     use crate::app_lock::FormMode;
@@ -949,7 +989,7 @@ fn app_lock_rows(app: &App, privacy: &mut Section) {
             translated(locale, "Lock after"),
             keyed(translated(
                 locale,
-                "Time without using ZapFast, also counted while it is in the tray. Ctrl+Shift+L locks it at once.",
+                "Time without using Wassup, also counted while it is in the tray. Ctrl+Shift+L locks it at once.",
             )),
             move |ui, app| {
                 let selected = app.settings.app_lock_after;
@@ -1153,22 +1193,8 @@ fn theme_picker(ui: &mut egui::Ui, app: &mut App) {
         {
             app.actions.push(Action::OpenThemesFolder);
         }
-        if theme::soft_button(
-            ui,
-            &palette,
-            Some(Icon::ExternalLink),
-            &crate::i18n::gettext(app.locale, "How to make a theme"),
-            false,
-        )
-        .clicked()
-        {
-            app.actions.push(Action::OpenUrl(THEMES_GUIDE.to_owned()));
-        }
     });
 }
-
-/// The website's page on writing a theme.
-const THEMES_GUIDE: &str = "https://zapfast.rocks/themes/";
 
 /// The interface language menu.
 fn font_picker(ui: &mut egui::Ui, app: &mut App) {
@@ -1794,7 +1820,7 @@ fn profile_field(
     response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter))
 }
 
-/// The version, links to more about ZapFast, and who made it.
+/// The version, links to more about Wassup, and who made it.
 fn about(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     ui.horizontal(|ui| {
@@ -1804,16 +1830,13 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
         ui.vertical(|ui| {
             theme::text(
                 ui,
-                format!("ZapFast {}", env!("CARGO_PKG_VERSION")),
+                format!("Wassup {}", env!("CARGO_PKG_VERSION")),
                 theme::semibold(16.0),
                 palette.text,
             );
             theme::paragraph(
                 ui,
-                crate::i18n::gettext(
-                    app.locale,
-                    "A native WhatsApp client built with Rust, egui, and whatsapp-rust.",
-                ),
+                crate::i18n::gettext(app.locale, crate::branding::DESCRIPTION),
                 theme::regular(13.0),
                 palette.secondary,
             );
@@ -1861,7 +1884,7 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
         .clicked()
         {
             app.actions
-                .push(Action::OpenUrl(env!("CARGO_PKG_REPOSITORY").to_owned()));
+                .push(Action::OpenUrl(crate::branding::SOURCE_URL.to_owned()));
         }
     });
     ui.add_space(14.0);

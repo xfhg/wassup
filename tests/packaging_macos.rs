@@ -1,4 +1,4 @@
-//! The macOS bundle carries the launch agent that starts ZapFast in the tray
+//! The macOS bundle carries the launch agent that starts Wassup in the tray
 //! at login, exactly as fastframe-autostart registers it.
 use std::fs;
 use std::path::PathBuf;
@@ -16,9 +16,8 @@ fn packaging(file: &str) -> String {
 
 #[test]
 fn the_bundle_carries_the_agent_that_starts_in_the_tray() {
-    // The identifier from before the rename, which the linked device and the
-    // keychain entries still go by.
-    let id = "me.paolino.fastsapp";
+    // This private fork must keep its app and login item separate from the upstream application.
+    let id = "local.wassup";
     assert!(packaging("Info.plist").contains(&format!("<string>{id}</string>")));
     assert_eq!(
         packaging("autostart.plist"),

@@ -435,6 +435,13 @@ pub fn populate(app: &mut App) {
     // Demo mode has no backend to handle downloads.
     app.account_mut().settings.auto_download = false;
     app.link = LinkStatus::Connected;
+    app.capture_status = Some(crate::capture::CaptureStatus {
+        last_saved_at: Some(crate::util::now()),
+        saved: 12,
+        queued: 1,
+        root: app.dirs.state.join("synthetic-permanent-archive"),
+        ..Default::default()
+    });
     app.blocklist.ids = Some(Default::default());
     app.me = Some(ME.to_owned());
     app.me_name = Some("Carmine".to_owned());
@@ -2617,6 +2624,120 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 app.typing.clear();
                 app.scroll_to_bottom = true;
             }
+            "deleted" | "deleted-list" => {
+                use crate::capture::view::{SavedMessage, SavedObservation};
+                app.page = Page::Deleted;
+                app.deleted_loading = false;
+                app.deleted_has_more = false;
+                app.deleted_selected_sender = Some(SAMPLES[0].id.to_owned());
+                app.deleted_show_thread = part != "deleted-list";
+                let now = crate::util::now();
+                let entries = [
+                    (
+                        1,
+                        SAMPLES[0].id,
+                        "Ada Lovelace",
+                        SAMPLES[0].id,
+                        "Ada Lovelace",
+                        "I've kept the original sketch. We can compare both versions tomorrow.",
+                        90_000,
+                    ),
+                    (
+                        2,
+                        SAMPLES[2].id,
+                        "Grace Hopper",
+                        SAMPLES[2].id,
+                        "Grace Hopper",
+                        "The notes are ready for review.",
+                        7_200,
+                    ),
+                    (
+                        3,
+                        ME,
+                        "You",
+                        SAMPLES[0].id,
+                        "Ada Lovelace",
+                        "Thanks. I'll bring the printed copy.",
+                        3_600,
+                    ),
+                    (
+                        4,
+                        SAMPLES[0].id,
+                        "Ada Lovelace",
+                        SAMPLES[1].id,
+                        "Rust Berlin",
+                        "Meet at the library at 18:00?",
+                        1_800,
+                    ),
+                    (
+                        5,
+                        ME,
+                        "You",
+                        SAMPLES[1].id,
+                        "Rust Berlin",
+                        "See you there.",
+                        900,
+                    ),
+                    (
+                        6,
+                        SAMPLES[0].id,
+                        "Ada Lovelace",
+                        SAMPLES[0].id,
+                        "Ada Lovelace",
+                        "One more thing: bring the small notebook, not the laptop.\n\nWe can work through the layout together.",
+                        300,
+                    ),
+                ];
+                app.deleted_messages = entries
+                    .into_iter()
+                    .rev()
+                    .map(|(sequence, sender, name, chat, chat_name, text, ago)| {
+                        crate::backend::DeletedMessage {
+                            sender_id: sender.into(),
+                            canonical_chat: chat.into(),
+                            chat_name: chat_name.into(),
+                            sender_name: name.into(),
+                            reason: if sender == ME {
+                                "Deleted for me"
+                            } else {
+                                "Deleted for everyone"
+                            }
+                            .into(),
+                            saved: SavedMessage {
+                                sequence,
+                                chat: chat.into(),
+                                message_id: format!("demo-retained-{sequence}"),
+                                sender: sender.into(),
+                                text: text.into(),
+                                sent_at: now - ago,
+                                observed_at: now - ago,
+                                outgoing: sender == ME,
+                                observed_on_whatsapp: true,
+                                send_accepted: sender == ME,
+                                deletion_observed: sender != ME,
+                                source: "durable_inbound".into(),
+                                markdown_path: app.account().dirs.cache.join("retained-fixture.md"),
+                                attachments: Vec::new(),
+                                history: if sequence == 4 {
+                                    vec![SavedObservation {
+                                        sequence: 7,
+                                        kind: "edited".into(),
+                                        text: "Meet at the library at 18:30?".into(),
+                                        sender: sender.into(),
+                                        sent_at: now - ago + 60,
+                                        observed_at: now - ago + 60,
+                                        source: "durable_inbound".into(),
+                                        attachments: Vec::new(),
+                                    }]
+                                } else {
+                                    Vec::new()
+                                },
+                                history_truncated: false,
+                            },
+                        }
+                    })
+                    .collect();
+            }
             "settings" => app.page = Page::Settings,
             choice if choice.starts_with("settings-search=") => {
                 app.page = Page::Settings;
@@ -2883,11 +3004,11 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 use crate::updates::{DownloadState, Installation, Kind, Prepared};
                 app.update = Some(crate::updates::Release {
                     version: "99.0.0".to_owned(),
-                    url: "https://github.com/crmne/zapfast/releases/latest".to_owned(),
+                    url: "https://example.invalid/releases/latest".to_owned(),
                 });
                 app.show_update = true;
                 let installation = Installation {
-                    executable: "/demo/zapfast".into(),
+                    executable: "/demo/wassup".into(),
                     kind: Kind::Portable,
                 };
                 app.update_support = Some(Ok(installation.clone()));
@@ -3327,6 +3448,12 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                     filename: "Messages light.json".into(),
                     palette: crate::theme::Palette::messages_light(),
                 });
+            }
+            "connecting" => {
+                unlink(app);
+                // The initial connection uses Starting. Connecting means a
+                // linked account is reconnecting and routes to the chat UI.
+                app.link = LinkStatus::Starting;
             }
             "login" => {
                 unlink(app);
@@ -6210,7 +6337,7 @@ mod tests {
             .filter_map(|(_, node)| node.label().or_else(|| node.value()))
             .collect();
         assert!(
-            !labels.contains(&"Locked chats are read-only in ZapFast"),
+            !labels.contains(&"Locked chats are read-only in Wassup"),
             "{labels:?}"
         );
         assert!(!labels.contains(&"admins"));
@@ -9693,6 +9820,10 @@ mod tests {
             "disappearing-saving",
             "disappearing-saving-group",
             "disappearing-readonly-group",
+            "deleted",
+            "deleted,light",
+            "deleted-list",
+            "deleted-list,light",
             "settings",
             "settings-search=Notifications",
             "settings-search=System",
@@ -9873,11 +10004,21 @@ mod tests {
             apply_flags(&mut app, Some(page));
             render(&mut app, &ctx);
         }
-        for page in ["login", "pair", "phone"] {
+        for page in ["login", "connecting", "pair", "phone"] {
             let mut app = self::app();
             apply_flags(&mut app, Some(page));
             render(&mut app, &ctx);
             assert!(!app.is_linked());
+        }
+        for page in [
+            "deleted",
+            "deleted,light",
+            "deleted-list",
+            "deleted-list,light",
+        ] {
+            let mut app = self::app();
+            apply_flags(&mut app, Some(page));
+            render_sized(&mut app, &ctx, egui::vec2(420.0, 780.0));
         }
     }
 
@@ -9952,7 +10093,7 @@ mod tests {
         }
     }
 
-    /// With the title bar ZapFast draws on Windows and Linux, no header
+    /// With the title bar Wassup draws on Windows and Linux, no header
     /// control lies under the caption buttons, at either end of the top edge
     /// and in each layout: GNOME's buttons at the right or the left, and
     /// Windows' taller row. Headers that reach a corner leave the buttons
@@ -17950,9 +18091,46 @@ mod tests {
         let bells: Vec<_> = nodes
             .iter()
             .filter(|node| node.label() == Some("Mute notifications"))
-            .map(|node| node.toggled() == Some(egui::accesskit::Toggled::True))
             .collect();
-        assert_eq!(bells, [false, true], "one bell per account, the second on");
+        assert_eq!(bells.len(), app.accounts.len(), "one bell per account");
+        // AccessKit's update vector has no traversal-order guarantee. Match
+        // the full account name before locating its bell inside the row:
+        // "Carmine" alone also prefixes "Carmine (Studio)".
+        for account in &app.accounts {
+            let name = account.display_label(app.locale);
+            let row_prefix = format!("{name}, ");
+            let rows: Vec<_> = nodes
+                .iter()
+                .filter(|node| {
+                    node.role() == egui::accesskit::Role::RadioButton
+                        && node
+                            .label()
+                            .is_some_and(|label| label == name || label.starts_with(&row_prefix))
+                })
+                .collect();
+            assert_eq!(rows.len(), 1, "one announced row for the account {name}");
+            let row_bounds = rows[0].bounds().expect("the account row has bounds");
+            let account_bells: Vec<_> = bells
+                .iter()
+                .filter(|bell| {
+                    let bounds = bell.bounds().expect("the bell has bounds");
+                    bounds.x0 >= row_bounds.x0
+                        && bounds.x1 <= row_bounds.x1
+                        && bounds.y0 >= row_bounds.y0
+                        && bounds.y1 <= row_bounds.y1
+                })
+                .collect();
+            assert_eq!(account_bells.len(), 1, "one bell in {name}'s row");
+            assert_eq!(
+                account_bells[0].toggled(),
+                Some(if account.settings.notifications {
+                    egui::accesskit::Toggled::False
+                } else {
+                    egui::accesskit::Toggled::True
+                }),
+                "{name}'s bell announces that account's mute state"
+            );
+        }
         // Only the muted account's row says so, not the one on screen.
         let said: Vec<_> = nodes
             .iter()
@@ -22111,63 +22289,6 @@ mod tests {
         }
     }
 
-    /// The theme row links to the website's guide to writing a theme.
-    #[test]
-    fn the_theme_row_opens_the_guide_to_making_a_theme() {
-        let mut app = app();
-        app.page = crate::model::Page::Settings;
-        let ctx = egui::Context::default();
-        ctx.enable_accesskit();
-        app.attach(&ctx);
-        render(&mut app, &ctx);
-        let nodes = accessible_nodes(&mut app, &ctx, Vec::new());
-        let pos = nodes
-            .into_iter()
-            .find(|(label, role, _)| {
-                label == "How to make a theme" && *role == egui::accesskit::Role::Button
-            })
-            .map(|(_, _, centre)| centre)
-            .expect("the guide button is on the Settings page");
-        let mut opened = Vec::new();
-        for pressed in [true, false] {
-            let mut output = ctx.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(1180.0, 780.0),
-                    )),
-                    events: vec![
-                        egui::Event::PointerMoved(pos),
-                        egui::Event::PointerButton {
-                            pos,
-                            button: egui::PointerButton::Primary,
-                            pressed,
-                            modifiers: egui::Modifiers::NONE,
-                        },
-                    ],
-                    ..Default::default()
-                },
-                |ui| {
-                    let ctx = ui.ctx().clone();
-                    app.background_frame(&ctx);
-                    app.frame_ui(ui);
-                },
-            );
-            output.textures_delta.clear();
-            opened.extend(
-                output
-                    .platform_output
-                    .commands
-                    .into_iter()
-                    .filter_map(|command| match command {
-                        egui::OutputCommand::OpenUrl(open) => Some(open.url),
-                        _ => None,
-                    }),
-            );
-        }
-        assert_eq!(opened, ["https://zapfast.rocks/themes/"]);
-    }
-
     /// The chat list is one clickable surface: each row starts where the one
     /// above ends, with no gap or rule between them.
     #[test]
@@ -22779,6 +22900,7 @@ mod tests {
                 Stop::Messages,
                 Stop::Chats,
                 Stop::Calls,
+                Stop::Deleted,
                 Stop::Starred,
                 Stop::Archived,
                 Stop::Locked,
@@ -22896,6 +23018,7 @@ mod tests {
                         Stop::Messages,
                         Stop::Chats,
                         Stop::Calls,
+                        Stop::Deleted,
                         Stop::Starred,
                         Stop::Archived,
                         Stop::Locked,
@@ -23103,7 +23226,7 @@ mod tests {
     }
 
     /// The About dialog shows the mark the app ships, rendered at its pixel
-    /// size from the packaged SVG, not a disc drawn in the theme's colours.
+    /// size from the supplied PNG, not a disc drawn in the theme's colours.
     #[test]
     fn about_shows_the_shipped_mark() {
         let mut app = app();
@@ -23113,10 +23236,158 @@ mod tests {
         render(&mut app, &ctx);
         let texture = ctx
             .data_mut(|data| {
-                data.get_temp::<egui::TextureHandle>(egui::Id::new(("zapfast-mark", 44_usize)))
+                data.get_temp::<egui::TextureHandle>(egui::Id::new(("wassup-mark", 44_usize)))
             })
             .expect("the mark was drawn at 44 pixels");
         assert_eq!(texture.size(), [44, 44]);
+    }
+
+    #[test]
+    fn about_and_settings_show_the_private_credit_and_open_profile_links() {
+        for page in ["about", "settings,settings-search=Source code"] {
+            let mut app = app();
+            apply_flags(&mut app, Some(page));
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            app.attach(&ctx);
+            let labels = accessible_labels(&mut app, &ctx);
+            assert!(
+                labels.contains(&"Smashed with coffee and pizza by ".to_owned()),
+                "{page}: private credit is displayed"
+            );
+            assert!(
+                labels.contains(&"xfhg".to_owned()),
+                "{page}: author is displayed"
+            );
+            assert!(labels.contains(&"A native WhatsApp client written in Rust with egui and whatsapp-rust that preserves received messages after deletion.".to_owned()), "{page}: private description is displayed");
+            assert!(
+                !labels
+                    .iter()
+                    .any(|label| label.contains("Built with love") || label == "Carmine Paolino")
+            );
+            if page == "about" {
+                assert!(
+                    labels
+                        .iter()
+                        .any(|label| label.starts_with("This is an unofficial client."))
+                );
+            }
+            for label in ["xfhg", "Source code"] {
+                render(&mut app, &ctx);
+                let pos = accessible_nodes(&mut app, &ctx, Vec::new())
+                    .into_iter()
+                    .find(|(name, role, _)| {
+                        // Settings' search field contains the same words as
+                        // its Source code button. Select the actual action.
+                        name == label
+                            && (!(page.starts_with("settings") && label == "Source code")
+                                || *role == egui::accesskit::Role::Button)
+                    })
+                    .map(|(_, _, pos)| pos)
+                    .unwrap_or_else(|| panic!("{page}: visible link {label}"));
+                let press = |pressed| egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                let mut urls = Vec::new();
+                for events in [
+                    vec![egui::Event::PointerMoved(pos)],
+                    vec![press(true)],
+                    vec![press(false)],
+                    Vec::new(),
+                ] {
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(1180.0, 780.0),
+                            )),
+                            events,
+                            ..Default::default()
+                        },
+                        |ui| {
+                            app.background_frame(&ui.ctx().clone());
+                            app.frame_ui(ui);
+                        },
+                    );
+                    output.textures_delta.clear();
+                    urls.extend(output.platform_output.commands.into_iter().filter_map(
+                        |command| match command {
+                            egui::OutputCommand::OpenUrl(url) => Some(url.url),
+                            _ => None,
+                        },
+                    ));
+                }
+                assert_eq!(
+                    urls,
+                    ["https://github.com/xfhg"],
+                    "{page}: clicking {label} requests the profile, without launching a browser"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_login_description_wraps_in_a_420_point_window() {
+        let description =
+            "A native WhatsApp client that preserves received messages after deletion.";
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(420.0, 780.0));
+        for page in ["login", "connecting"] {
+            let mut app = app();
+            apply_flags(&mut app, Some(page));
+            let ctx = egui::Context::default();
+            app.attach(&ctx);
+            render_sized(&mut app, &ctx, screen.size());
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| {
+                    app.background_frame(&ui.ctx().clone());
+                    app.frame_ui(ui);
+                },
+            );
+            output.textures_delta.clear();
+            let mut found = false;
+            let mut connecting = false;
+            let mut qr_prompt = false;
+            for clipped in &output.shapes {
+                let mut pending = vec![&clipped.shape];
+                while let Some(shape) = pending.pop() {
+                    match shape {
+                        egui::Shape::Text(text) => {
+                            connecting |= text.galley.text() == "Connecting to WhatsApp…";
+                            qr_prompt |= text.galley.text() == "Link this computer";
+                            if text.galley.text() == description {
+                                found = true;
+                                assert!(!text.galley.elided, "{page}: the description is complete");
+                                assert!(
+                                    text.galley.rows.len() > 1,
+                                    "{page}: it wraps across lines"
+                                );
+                                let bounds = text.galley.rect.translate(text.pos.to_vec2());
+                                assert!(
+                                    screen.contains_rect(bounds),
+                                    "{page}: text stays in the window: {bounds:?}"
+                                );
+                                assert!(
+                                    clipped.clip_rect.contains_rect(bounds),
+                                    "{page}: text is not clipped: {bounds:?}"
+                                );
+                            }
+                        }
+                        egui::Shape::Vec(shapes) => pending.extend(shapes),
+                        _ => {}
+                    }
+                }
+            }
+            assert!(found, "{page}: the description reaches the screen");
+            assert_eq!(connecting, page == "connecting");
+            assert_eq!(qr_prompt, page == "login");
+        }
     }
 
     /// The shortcuts dialog stays inside the window: two columns where the
@@ -23439,7 +23710,7 @@ mod tests {
         );
     }
 
-    /// A video sent before ZapFast made thumbnails has none. With its file
+    /// A video sent before Wassup made thumbnails has none. With its file
     /// here it still shows as a video; only without either is it a file card.
     #[test]
     fn a_video_without_a_thumbnail_shows_from_its_file() {
@@ -24514,7 +24785,7 @@ mod bubble_detail_tests {
 
     /// The `bubbles` page in both Messages palettes: every message of the
     /// sample is drawn, and only each run's last balloon curls a tail out of
-    /// its side, as far as Apple's reaches at ZapFast's text size; a lone
+    /// its side, as far as Apple's reaches at Wassup's text size; a lone
     /// photo leaves the tail to the balloon after it. All of it fits a 1280
     /// by 800 window.
     #[test]
@@ -25617,6 +25888,173 @@ mod rail_tests {
         }
     }
 
+    /// Read what the visible sender rows announce, without assuming tree order.
+    fn deleted_sender_labels(app: &mut App, ctx: &egui::Context, width: f32) -> Vec<String> {
+        ctx.enable_accesskit();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 780.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                app.background_frame(&ui.ctx().clone());
+                app.frame_ui(ui);
+            },
+        );
+        output.textures_delta.clear();
+        output
+            .platform_output
+            .accesskit_update
+            .expect("accessibility tree")
+            .nodes
+            .iter()
+            .filter_map(|(_, node)| node.label())
+            .filter(|label| label.contains(", ") && label.contains(" saved message"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn deleted_senders_combine_six_originals_with_chat_and_day_context() {
+        let (mut app, ctx) = open("deleted", false);
+        assert_eq!(app.deleted_messages.len(), 6);
+        let labels = deleted_sender_labels(&mut app, &ctx, 1180.0);
+        assert_eq!(labels.len(), 3, "one visible row per sender: {labels:?}");
+        for prefix in [
+            "Ada Lovelace, 3 saved messages, ",
+            "You, 2 saved messages, ",
+            "Grace Hopper, 1 saved message, ",
+        ] {
+            assert!(
+                labels.iter().any(|label| label.starts_with(prefix)),
+                "{prefix}: {labels:?}"
+            );
+        }
+        let drawn = frame_at(&mut app, &ctx, egui::vec2(1180.0, 1000.0), Vec::new());
+        assert!(drawn.contains(&"3 saved messages · independent copies".to_owned()));
+        assert!(
+            drawn.contains(&"Rust Berlin".to_owned()),
+            "the group source is shown beside Ada's direct-chat copies"
+        );
+        let mut days = std::collections::BTreeSet::new();
+        for row in app
+            .deleted_messages
+            .iter()
+            .filter(|row| row.sender_id == SAMPLES[0].id)
+        {
+            assert!(
+                drawn.contains(&row.saved.text),
+                "each original is in Ada's thread"
+            );
+            days.insert(crate::util::day_label(app.locale, row.saved.observed_at));
+        }
+        assert!(days.len() >= 2, "the fixture spans more than one saved day");
+        for day in days {
+            assert!(drawn.contains(&day), "saved-day section {day} is visible");
+        }
+    }
+
+    #[test]
+    fn deleted_sender_counts_and_threads_exclude_newly_locked_chats() {
+        let (mut app, ctx) = open("deleted", false);
+        for chat in &mut app.chats {
+            if chat.id == SAMPLES[1].id || chat.id == SAMPLES[2].id {
+                chat.locked = true;
+            }
+        }
+        let labels = deleted_sender_labels(&mut app, &ctx, 1180.0);
+        assert_eq!(
+            labels.len(),
+            2,
+            "Grace's locked chat contributes no sender row: {labels:?}"
+        );
+        for prefix in ["Ada Lovelace, 2 saved messages, ", "You, 1 saved message, "] {
+            assert!(
+                labels.iter().any(|label| label.starts_with(prefix)),
+                "{prefix}: {labels:?}"
+            );
+        }
+        assert!(
+            !labels
+                .iter()
+                .any(|label| label.starts_with("Grace Hopper, "))
+        );
+        let drawn = frame_at(&mut app, &ctx, egui::vec2(1180.0, 780.0), Vec::new());
+        assert!(drawn.contains(&"2 saved messages · independent copies".to_owned()));
+        assert!(!drawn.contains(&"Rust Berlin".to_owned()));
+        for row in app.deleted_messages.iter().filter(|row| {
+            row.canonical_chat == SAMPLES[1].id || row.canonical_chat == SAMPLES[2].id
+        }) {
+            assert!(
+                !drawn.contains(&row.saved.text),
+                "locked originals do not reach the visible thread or preview"
+            );
+        }
+        assert_eq!(
+            app.deleted_messages.len(),
+            6,
+            "privacy filtering does not erase the retained originals"
+        );
+    }
+
+    #[test]
+    fn deleted_sender_selection_and_narrow_back_follow_pointer_input() {
+        let (mut app, ctx) = open("deleted", false);
+        let account = app.account().id.as_str().to_owned();
+        let grace = ctx
+            .read_response(crate::ui::deleted::sender_row_id(&account, SAMPLES[2].id))
+            .expect("Grace's sender row is visible")
+            .rect
+            .center();
+        click(&mut app, &ctx, 1180.0, grace);
+        assert_eq!(app.deleted_selected_sender.as_deref(), Some(SAMPLES[2].id));
+        let drawn = frame_at(&mut app, &ctx, egui::vec2(1180.0, 780.0), Vec::new());
+        assert!(drawn.contains(&"1 saved message · independent copies".to_owned()));
+        let ada_oldest = app
+            .deleted_messages
+            .iter()
+            .find(|row| row.saved.sequence == 1)
+            .unwrap();
+        assert!(
+            !drawn.contains(&ada_oldest.saved.text),
+            "selecting Grace replaces Ada's thread"
+        );
+
+        for _ in 0..3 {
+            frame(&mut app, &ctx, 420.0, Vec::new());
+        }
+        assert!(!app.deleted_show_thread);
+        let ada = ctx
+            .read_response(crate::ui::deleted::sender_row_id(&account, SAMPLES[0].id))
+            .expect("narrow mode shows the sender list")
+            .rect
+            .center();
+        click(&mut app, &ctx, 420.0, ada);
+        assert!(app.deleted_show_thread);
+        assert_eq!(app.deleted_selected_sender.as_deref(), Some(SAMPLES[0].id));
+        let drawn = frame_at(&mut app, &ctx, egui::vec2(420.0, 780.0), Vec::new());
+        assert!(drawn.contains(&"3 saved messages · independent copies".to_owned()));
+        assert!(
+            !drawn.contains(&"Deleted messages".to_owned()),
+            "the narrow thread replaces the list"
+        );
+
+        let back = focus::named_button(&ctx, "Back to senders")
+            .and_then(|id| ctx.read_response(id))
+            .expect("the thread offers Back to senders")
+            .rect
+            .center();
+        click(&mut app, &ctx, 420.0, back);
+        assert_eq!(app.page, Page::Deleted);
+        assert!(!app.deleted_show_thread);
+        assert_eq!(app.deleted_selected_sender.as_deref(), Some(SAMPLES[0].id));
+        let labels = deleted_sender_labels(&mut app, &ctx, 420.0);
+        assert_eq!(labels.len(), 3, "Back returns to the complete sender list");
+    }
+
     /// The rail stands at the window's left edge beside the list, with Chats
     /// and Calls at its top and Starred, Settings and our avatar at its foot;
     /// with the list hidden, the chats' avatars fill it between the two. On
@@ -25737,6 +26175,7 @@ mod rail_tests {
                     let mut expected = vec![
                         Stop::Chats,
                         Stop::Calls,
+                        Stop::Deleted,
                         Stop::Starred,
                         Stop::Archived,
                         Stop::Locked,

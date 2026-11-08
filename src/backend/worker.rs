@@ -42,9 +42,11 @@ mod archive_chats;
 mod blocking;
 mod bot_replies;
 mod calls;
+mod capture_bridge;
 mod channel_pictures;
 mod chat_export;
 mod contact_names;
+mod deleted;
 mod device_store;
 mod disappearing;
 mod download_folders;
@@ -778,9 +780,9 @@ impl Downloadable for PhoneSticker {
 fn device_name() -> String {
     let host = crate::util::hostname();
     if host.is_empty() {
-        "ZapFast".to_owned()
+        "Wassup".to_owned()
     } else {
-        format!("ZapFast ({host})")
+        format!("Wassup ({host})")
     }
 }
 
@@ -913,7 +915,7 @@ pub async fn run(
     let privacy_snapshot =
         !privacy_confirmed && archive.chats().is_ok_and(|chats| !chats.is_empty());
     // A new link receives the phone's favorites and its "Keep chats archived"
-    // with its first sync; only an archive filled before ZapFast followed
+    // with its first sync; only an archive filled before Wassup followed
     // them needs them replayed.
     let replayed = [
         stickers::FAVORITES_RECOVERED,
@@ -955,7 +957,7 @@ pub async fn run(
             && archive
                 .set_meta(contact_names::FIRST_NAMES_RECOVERED, "complete")
                 .is_ok());
-    // Only stars synced before ZapFast followed them were consumed unseen.
+    // Only stars synced before Wassup followed them were consumed unseen.
     let stars_recovered = archive
         .meta(star_recovery::STARS_RECOVERED)
         .ok()
@@ -992,6 +994,9 @@ pub async fn run(
         commands,
         waker,
         archive,
+        capture: None,
+        capture_media: None,
+        capture_monitor: None,
         client: None,
         handle: None,
         call: None,
@@ -1318,13 +1323,13 @@ fn invite_error(error: &str) -> String {
 /// unconfirmed. A healthy sync answers well within this.
 const PRIVACY_GRACE: Duration = Duration::from_secs(10);
 
-/// How long ZapFast stays "available" after the window loses focus.
+/// How long Wassup stays "available" after the window loses focus.
 const PRESENCE_LINGER: Duration = Duration::from_secs(10);
 
 /// The window owns every presence transition (#461). Left at the default
 /// `Automatic` policy, the client announces "available" whenever it connects
 /// or the push name syncs, so an account whose window sits in the tray still
-/// shows online and the phone holds back its own notifications. ZapFast
+/// shows online and the phone holds back its own notifications. Wassup
 /// announces through `Command::SetOnline` instead.
 ///
 /// Public so the integration test in `tests/presence.rs` drives the same
@@ -1502,6 +1507,9 @@ struct Worker {
     commands: mpsc::UnboundedSender<Command>,
     waker: Waker,
     archive: Archive,
+    capture: Option<Arc<crate::capture::Capture>>,
+    capture_media: Option<crate::capture::media::MediaWorker>,
+    capture_monitor: Option<tokio::task::JoinHandle<()>>,
     client: Option<Arc<Client>>,
     handle: Option<BotHandle>,
     wa_sender: mpsc::UnboundedSender<RuntimeEvent>,
@@ -1638,7 +1646,7 @@ struct Worker {
     favorites_pushing: bool,
     /// More favorite changes arrived while a push was running.
     favorites_again: bool,
-    /// The phone's favorites from before ZapFast followed them were replayed.
+    /// The phone's favorites from before Wassup followed them were replayed.
     favorites_recovered: bool,
     /// That replay is running.
     favorites_recovering: bool,
@@ -1646,7 +1654,7 @@ struct Worker {
     first_names_recovered: bool,
     /// That replay is running.
     first_names_recovering: bool,
-    /// The phone's stars from before ZapFast followed them were replayed.
+    /// The phone's stars from before Wassup followed them were replayed.
     stars_recovered: bool,
     /// That replay is running.
     stars_recovering: bool,
@@ -1904,7 +1912,7 @@ const PHONE_RANGE_LOOKBACK: usize = 20;
 
 /// The range WhatsApp checks before it archives or unarchives a chat on the
 /// phone: the chat's newest message. A phone left the chat in place when
-/// the change came without one. A row ZapFast invented (a local call entry,
+/// the change came without one. A row Wassup invented (a local call entry,
 /// a disappearing-timer notice) was never sent under that id, so it gives its
 /// time but names no message, and a message without a time is treated as
 /// none.
@@ -3119,6 +3127,39 @@ impl Worker {
                 return;
             }
         };
+        // A cleared or new device cannot inherit an old archive namespace,
+        // including after an interrupted unlink and restart.
+        use whatsapp_rust::wacore::store::traits::DeviceStore;
+        let linked = match store.load().await {
+            Ok(device) => device.is_some_and(|device| device.pn.is_some()),
+            Err(_) => {
+                self.set_status(LinkStatus::Failed(
+                    "Cannot verify the linked device for permanent capture".into(),
+                ));
+                return;
+            }
+        };
+        if !linked {
+            self.capture = None;
+            if self.archive.reset_capture_identity_durable().is_err() {
+                self.emit(Event::CaptureStatus(crate::capture::CaptureStatus {
+                    paused: true,
+                    error: Some(
+                        "Cannot reset the archive identity. Check storage access and reconnect."
+                            .into(),
+                    ),
+                    root: crate::capture::default_root(),
+                    ..Default::default()
+                }));
+                self.set_status(LinkStatus::Failed(
+                    "Capture paused: the previous archive identity could not be reset".into(),
+                ));
+                return;
+            }
+        }
+        if !self.prepare_capture().await {
+            return;
+        }
         let sender = self.wa_sender.clone();
         let builder = host_owned_presence(Bot::builder().with_backend(store))
             .with_watched_ab_props([
@@ -3142,6 +3183,9 @@ impl Worker {
                 .with_transport_factory(crate::transport::HappyEyeballsTransportFactory::new()),
         };
         let bot = builder
+            .with_inbound_durability_hook_arc(
+                self.capture.as_ref().expect("capture initialized").clone(),
+            )
             // WhatsApp reads the linked-device name, version, and icon at pairing.
             .with_device_props(
                 DevicePropsOverride::new()
@@ -3159,6 +3203,10 @@ impl Worker {
         match bot {
             Ok(bot) => {
                 let handle = bot.spawn();
+                self.capture_media = Some(crate::capture::media::start(
+                    self.capture.as_ref().expect("capture initialized").clone(),
+                    handle.client(),
+                ));
                 self.client = Some(handle.client());
                 self.handle = Some(handle);
                 self.set_status(LinkStatus::Connecting);
@@ -3432,6 +3480,12 @@ impl Worker {
     }
 
     async fn stop_bot(&mut self) {
+        if let Some(media) = self.capture_media.take() {
+            media.stop().await;
+        }
+        if let Some(monitor) = self.capture_monitor.take() {
+            monitor.abort();
+        }
         self.blocklist.invalidate();
         self.client = None;
         // A batch still going belongs to the session that was sending it, and
@@ -4227,11 +4281,24 @@ impl Worker {
             }
             E::ClientOutdated(_) => {
                 self.set_status(LinkStatus::Failed(
-                    "WhatsApp rejected this version of ZapFast. Update the app".to_owned(),
+                    "WhatsApp rejected this version of Wassup. Update the app".to_owned(),
                 ));
             }
             E::Messages(batch) => {
                 for inbound in batch.messages.iter() {
+                    // A completed hook is the durable boundary. Do not make
+                    // already-acknowledged deliveries depend on another write.
+                    // Event-only recovery still needs saving before mutation.
+                    let saved = batch.hook_committed
+                        || self.capture.as_ref().is_some_and(|capture| {
+                            capture
+                                .record_incoming(&inbound.message, &inbound.info, "incoming_event")
+                                .is_ok()
+                        });
+                    if !saved {
+                        self.capture_failure();
+                        continue;
+                    }
                     self.ingest(&inbound.message, &inbound.info);
                 }
             }
@@ -4667,7 +4734,9 @@ impl Worker {
         self.sticker_retried.clear();
         self.sticker_arrivals = 0;
         self.stop_bot().await;
-        if let Err(error) = self.archive.clear() {
+        self.capture = None;
+        let capture_identity_reset = self.archive.reset_capture_identity_durable().is_ok();
+        if capture_identity_reset && let Err(error) = self.archive.clear() {
             log::warn!("could not clear the archive: {error}");
         }
         self.lid_to_pn.clear();
@@ -4742,6 +4811,20 @@ impl Worker {
         self.privacy_recovering = false;
         self.privacy_retry = Instant::now();
         self.set_status(LinkStatus::LoggedOut);
+        // Do not reuse the previous archive identity if both storage cleanup
+        // and removal of the old session files failed.
+        if !capture_identity_reset {
+            self.emit(Event::CaptureStatus(crate::capture::CaptureStatus {
+                paused: true,
+                error: Some("Cannot reset the archive identity after unlinking. Check storage access and restart Wassup.".into()),
+                root: crate::capture::default_root(),
+                ..Default::default()
+            }));
+            self.set_status(LinkStatus::Failed(
+                "Capture paused: unlink cleanup could not finish".into(),
+            ));
+            return;
+        }
         // Recreate the store so the next connection starts linking.
         self.start_bot().await;
     }
@@ -5918,8 +6001,21 @@ impl Worker {
     }
 
     /// Archives a message and emits chat and row updates.
-    fn store_message(&mut self, message: Message, raw: Option<Vec<u8>>, push_name: Option<&str>) {
+    fn store_message(
+        &mut self,
+        message: Message,
+        raw: Option<Vec<u8>>,
+        push_name: Option<&str>,
+    ) -> bool {
+        if message.from_me
+            && message.status == Delivery::Pending
+            && raw.is_some()
+            && !self.capture_outgoing(&message, raw.as_deref().unwrap_or_default())
+        {
+            return false;
+        }
         self.archive_message(message, raw, push_name, false);
+        true
     }
 
     /// The phone's "Keep chats archived" once it has said, else Settings'.
@@ -7183,7 +7279,7 @@ impl Worker {
                 self.refuse_blocked(command);
                 return;
             }
-            let error = "This conversation is read-only in ZapFast".to_owned();
+            let error = "This conversation is read-only in Wassup".to_owned();
             if matches!(&command, Command::CreatePoll { .. }) {
                 self.emit(Event::PollCreated {
                     chat: chat.clone(),
@@ -7409,6 +7505,7 @@ impl Worker {
                 from,
                 until,
             } => self.search_chat_messages(chat, query, from, until),
+            Command::LoadDeleted { request, before } => self.load_deleted(request, before),
             Command::LoadStarred => self.emit_starred(),
             Command::SetStar {
                 chat,
@@ -7592,11 +7689,16 @@ impl Worker {
                 chat, width, height, rgba, view_once, caption, mentions, quoting,
             ),
             Command::Outbound {
+                generation,
                 chat,
                 row,
                 raw,
                 turn,
-            } => self.outbound(chat, *row, raw, turn),
+            } => {
+                if generation == self.privacy_generation {
+                    self.outbound(chat, *row, raw, turn);
+                }
+            }
             Command::SendSticker {
                 chat,
                 path,
@@ -8313,7 +8415,7 @@ impl Worker {
                 let Some(client) = self.client.clone() else {
                     self.emit(Event::InvitePreview {
                         code,
-                        result: Err("ZapFast is not connected to WhatsApp".to_owned()),
+                        result: Err("Wassup is not connected to WhatsApp".to_owned()),
                     });
                     return;
                 };
@@ -8342,7 +8444,7 @@ impl Worker {
                 let Some(client) = self.client.clone() else {
                     self.emit(Event::InviteJoined {
                         code,
-                        result: Err("ZapFast is not connected to WhatsApp".to_owned()),
+                        result: Err("Wassup is not connected to WhatsApp".to_owned()),
                     });
                     return;
                 };
@@ -8633,7 +8735,7 @@ impl Worker {
                         // The phone has cleared it; say so rather than leave
                         // the messages here looking as if nothing happened.
                         self.emit(Event::Error(
-                            "The phone cleared this chat, but ZapFast could not clear it here"
+                            "The phone cleared this chat, but Wassup could not clear it here"
                                 .to_owned(),
                         ));
                     }
@@ -9524,6 +9626,7 @@ impl Worker {
         if self.wants_mention_all(&chat, &text) {
             crate::mentions::push_everyone_id(&mut mentions);
         }
+        let unsent_text = text.clone();
         let (mut message, content, thumbnail) =
             self.compose_text(text, context, &mentions, preview);
         let expiration = self.apply_ephemeral(&chat, &mut message);
@@ -9548,8 +9651,17 @@ impl Worker {
             forwarded: false,
             thumbnail,
         };
-        self.store_message(row, Some(message.encode_to_vec()), None);
+        if !self.store_message(row, Some(message.encode_to_vec()), None) {
+            self.refuse(
+                chat,
+                quoting,
+                Unsent::Text(unsent_text),
+                Refusal::CaptureUnavailable,
+            );
+            return;
+        }
         tokio::spawn(send_outgoing(
+            self.capture.clone(),
             client,
             self.commands.clone(),
             chat,
@@ -9666,8 +9778,12 @@ impl Worker {
             forwarded: false,
             thumbnail: None,
         };
-        self.store_message(row, Some(message.encode_to_vec()), None);
+        if !self.store_message(row, Some(message.encode_to_vec()), None) {
+            self.refuse(chat, quoting, unsent(), Refusal::CaptureUnavailable);
+            return;
+        }
         tokio::spawn(send_outgoing(
+            self.capture.clone(),
             client,
             self.commands.clone(),
             chat,
@@ -9751,6 +9867,7 @@ impl Worker {
             return;
         };
         tokio::spawn(send_outgoing(
+            self.capture.clone(),
             client,
             self.commands.clone(),
             to_chat,
@@ -9777,6 +9894,7 @@ impl Worker {
         };
         let (to_chat, jid, message, expiration) = job;
         tokio::spawn(send_outgoing(
+            self.capture.clone(),
             client,
             self.commands.clone(),
             to_chat,
@@ -9833,7 +9951,7 @@ impl Worker {
             self.emit_chat(&job.0);
             if !reported_read_only {
                 self.emit(Event::Error(
-                    "This conversation is read-only in ZapFast".to_owned(),
+                    "This conversation is read-only in Wassup".to_owned(),
                 ));
                 reported_read_only = true;
             }
@@ -9944,7 +10062,9 @@ impl Worker {
             thumbnail,
         );
         row.forwarded = !own;
-        self.store_message(row, Some(message.encode_to_vec()), None);
+        if !self.store_message(row, Some(message.encode_to_vec()), None) {
+            return None;
+        }
         Some((id, message, expiration))
     }
 
@@ -11017,7 +11137,18 @@ impl Worker {
                     return;
                 }
             };
+        if !self.capture_action(
+            "edit_requested",
+            &chat,
+            &id,
+            crate::capture::content_text(&content),
+            message.encode_to_vec(),
+        ) {
+            self.emit_message(&chat, &id);
+            return;
+        }
         let generation = self.begin_edit(&chat, &id);
+        let capture = self.capture.clone();
         let commands = self.commands.clone();
         tokio::spawn(async move {
             let accepted = client
@@ -11030,6 +11161,24 @@ impl Worker {
                 .await
                 .map(|_| (content, mention_rows))
                 .map_err(|error| format!("Could not send the edit: {error}"));
+            if let Some(capture) = capture {
+                let (kind, text) = match &accepted {
+                    Ok((content, _)) => ("edit_accepted", crate::capture::content_text(content)),
+                    Err(_) => ("edit_uncertain", String::new()),
+                };
+                if capture
+                    .record_event(capture_bridge::action_event(
+                        kind,
+                        &chat,
+                        &id,
+                        text,
+                        Vec::new(),
+                    ))
+                    .is_err()
+                {
+                    log::warn!("could not record an edit outcome in the permanent archive");
+                }
+            }
             let _ = commands.send(Command::EditSettled {
                 chat,
                 id,
@@ -11315,7 +11464,7 @@ impl Worker {
             }
             Err(_) => {
                 self.emit(Event::Error(
-                    "WhatsApp accepted the deletion, but ZapFast could not remove its copy. Local cleanup is saved for restart or reconnect".to_owned(),
+                    "WhatsApp accepted the deletion, but Wassup could not remove its copy. Local cleanup is saved for restart or reconnect".to_owned(),
                 ));
                 RemovalHere::Failed
             }
@@ -11327,6 +11476,10 @@ impl Worker {
             self.emit(Event::Error("Not connected to WhatsApp".to_owned()));
             return;
         };
+        if !self.capture_action("revoke_requested", &chat, &id, String::new(), Vec::new()) {
+            return;
+        }
+        let capture = self.capture.clone();
         let old = self.archive.message(&chat, &id).ok().flatten();
         if let Ok(true) = self
             .archive
@@ -11338,7 +11491,29 @@ impl Worker {
         }
         let commands = self.commands.clone();
         tokio::spawn(async move {
-            if let Err(error) = client.revoke_message_raw(jid, id, RevokeType::Sender).await {
+            let result = client
+                .revoke_message_raw(jid, id.clone(), RevokeType::Sender)
+                .await;
+            if let Some(capture) = capture {
+                let kind = if result.is_ok() {
+                    "revoke_accepted"
+                } else {
+                    "revoke_uncertain"
+                };
+                if capture
+                    .record_event(capture_bridge::action_event(
+                        kind,
+                        &chat,
+                        &id,
+                        String::new(),
+                        Vec::new(),
+                    ))
+                    .is_err()
+                {
+                    log::warn!("could not record a revocation outcome in the permanent archive");
+                }
+            }
+            if let Err(error) = result {
                 let _ = commands.send(Command::Sent {
                     chat,
                     id: String::new(),
@@ -11420,6 +11595,7 @@ impl Worker {
             let client = client.clone();
             // Like the caption, the reply belongs to the first file.
             let quote = quote.take();
+            let generation = self.privacy_generation;
             let commands = self.commands.clone();
             let chat = chat.clone();
             let dir = self.dirs.media_cache_dir();
@@ -11496,6 +11672,7 @@ impl Worker {
                         // Stamped now, after the one before it, so it sorts after it.
                         row.timestamp = crate::util::now();
                         let _ = commands.send(Command::Outbound {
+                            generation,
                             chat,
                             row: Box::new(row),
                             raw,
@@ -11555,6 +11732,7 @@ impl Worker {
             crate::mentions::push_everyone_id(&mut mentions);
         }
         let (previous, turn) = self.send_turn(&chat);
+        let generation = self.privacy_generation;
         let commands = self.commands.clone();
         let dir = self.dirs.media_cache_dir();
         let me = self.me();
@@ -11605,6 +11783,7 @@ impl Worker {
                     // Stamped now, after the one before it, so it sorts after it.
                     row.timestamp = crate::util::now();
                     let _ = commands.send(Command::Outbound {
+                        generation,
                         chat,
                         row: Box::new(row),
                         raw,
@@ -11642,6 +11821,7 @@ impl Worker {
             self.refuse(chat, quoting, Unsent::Voice(samples), Refusal::Offline);
             return;
         };
+        let generation = self.privacy_generation;
         let commands = self.commands.clone();
         let dir = self.dirs.media_cache_dir();
         let me = self.me();
@@ -11666,6 +11846,7 @@ impl Worker {
                 Ok((mut row, raw)) => {
                     row.quoted = shown;
                     let _ = commands.send(Command::Outbound {
+                        generation,
                         chat,
                         row: Box::new(row),
                         raw,
@@ -11734,6 +11915,7 @@ impl Worker {
             self.refuse(chat, quoting, Unsent::Sticker, Refusal::Offline);
             return;
         };
+        let generation = self.privacy_generation;
         let commands = self.commands.clone();
         let dir = self.dirs.media_cache_dir();
         let me = self.me();
@@ -11749,6 +11931,7 @@ impl Worker {
             match outcome {
                 Ok((row, raw)) => {
                     let _ = commands.send(Command::Outbound {
+                        generation,
                         chat,
                         row: Box::new(row),
                         raw,
@@ -11779,6 +11962,7 @@ impl Worker {
             self.refuse(chat, quoting, Unsent::Gif, Refusal::Offline);
             return;
         };
+        let generation = self.privacy_generation;
         let commands = self.commands.clone();
         let dir = self.dirs.media_cache_dir();
         let me = self.me();
@@ -11810,6 +11994,7 @@ impl Worker {
             match outcome {
                 Ok((row, raw)) => {
                     let _ = commands.send(Command::Outbound {
+                        generation,
                         chat,
                         row: Box::new(row),
                         raw,
@@ -11856,8 +12041,40 @@ impl Worker {
         let expiration = self.apply_ephemeral(&chat, &mut message);
         let raw = attachment_archive_raw(&message);
         let id = row.id.clone();
-        self.store_message(row, Some(raw), None);
+        let restore = row
+            .content
+            .media()
+            .and_then(|media| media.path.clone())
+            .map(|path| {
+                let documents = matches!(row.content, Content::Document { .. });
+                let caption = match &row.content {
+                    Content::Image { caption, .. }
+                    | Content::Video { caption, .. }
+                    | Content::Document { caption, .. } => caption.clone(),
+                    _ => None,
+                };
+                let quoting = row.quoted.as_ref().map(|quoted| crate::model::ReplyTarget {
+                    id: quoted.id.clone(),
+                    chat: quoted.chat.clone(),
+                });
+                (
+                    quoting,
+                    Unsent::Files {
+                        paths: vec![path],
+                        documents,
+                        view_once: false,
+                        caption,
+                    },
+                )
+            });
+        if !self.store_message(row, Some(raw), None) {
+            if let Some((quoting, unsent)) = restore {
+                self.refuse(chat, quoting, unsent, Refusal::CaptureUnavailable);
+            }
+            return;
+        }
         tokio::spawn(send_outgoing(
+            self.capture.clone(),
             client,
             self.commands.clone(),
             chat,
@@ -12072,6 +12289,7 @@ fn apply_ephemeral_expiration(message: &mut wa::Message, expiration: Option<u32>
 
 #[allow(clippy::too_many_arguments)]
 async fn send_outgoing(
+    capture: Option<Arc<crate::capture::Capture>>,
     client: Arc<Client>,
     commands: mpsc::UnboundedSender<Command>,
     chat: ChatId,
@@ -12131,6 +12349,25 @@ async fn send_outgoing(
         Ok(())
     }
     .await;
+    if let Some(capture) = capture {
+        let kind = if result.is_ok() {
+            "send_accepted"
+        } else {
+            "send_uncertain"
+        };
+        if capture
+            .record_event(capture_bridge::action_event(
+                kind,
+                &chat,
+                &id,
+                String::new(),
+                Vec::new(),
+            ))
+            .is_err()
+        {
+            log::warn!("could not record a send outcome in the permanent archive");
+        }
+    }
     if let Some(done) = done {
         let _ = done.send(());
     }
@@ -12753,10 +12990,18 @@ fn sticker_of(base: &wa::Message) -> Option<&wa::message::StickerMessage> {
     })
 }
 
-/// Converts a protocol message to visible content, or `None` for internal
-/// traffic. Takes the whole message, wrappers included: view-once media
-/// arrives wrapped, and WhatsApp keeps it for the phone, so a linked device
-/// shows a placeholder instead of an attachment that cannot be fetched.
+/// The permanent journal also contains protocol observations which are not
+/// standalone chat bubbles. Their absent archive rows do not mean deletion.
+pub(crate) fn retained_original_is_visible(message: &wa::Message) -> bool {
+    let base = message.get_base_message();
+    !message.is_view_once()
+        && !base.protocol_message.is_set()
+        && !base.reaction_message.is_set()
+        && classify(message).is_some()
+}
+
+/// Classifies content for a chat bubble. View-once media arrives wrapped;
+/// WhatsApp keeps it for the phone, so linked devices show a placeholder.
 fn classify(message: &wa::Message) -> Option<Content> {
     let content = classify_base(message.get_base_message())?;
     // Interactive messages travel in the same wrapper, so only media turns
@@ -13452,7 +13697,7 @@ fn whatsapp_audio_mime(mime: &str) -> Option<&'static str> {
 /// inline, and WhatsApp drops a video message in another container (a
 /// QuickTime `.mov`, WebM, MKV, AVI) without telling either side, so the
 /// recipient gets nothing (#553). Those go as documents and arrive as the
-/// original file; ZapFast does not transcode.
+/// original file; Wassup does not transcode.
 fn whatsapp_video_mime(mime: &str) -> bool {
     mime == "video/mp4"
 }
@@ -14623,7 +14868,7 @@ fn ensure_message_secret(raw: Vec<u8>, secret: Option<&[u8]>) -> Vec<u8> {
 /// The newest row the archive holds for a chat: the point the phone is asked to
 /// clear or delete through. Its range carries that time and no message id, so a
 /// timer notice's own time is as good as a message's, and running to it keeps
-/// nothing ZapFast filed for itself behind. An archive that cannot be read
+/// nothing Wassup filed for itself behind. An archive that cannot be read
 /// yields no boundary at all, because a guessed one would clear the phone past
 /// messages this device never saw, and the dialog would say both sides matched.
 fn clear_boundary(read: crate::archive::Result<Vec<Message>>) -> Option<i64> {
@@ -17235,7 +17480,7 @@ mod tests {
         client
             .persistence_manager()
             .process_command(whatsapp_rust::store::commands::DeviceCommand::SetPushName(
-                "ZapFast".to_owned(),
+                "Wassup".to_owned(),
             ))
             .await;
         worker.client = Some(client);
@@ -19841,7 +20086,7 @@ mod receipt_tests {
         assert_eq!(id, "allowed");
         assert_eq!(job.0, PEER);
         let errors = std::iter::from_fn(|| events.try_recv().ok())
-            .filter(|event| matches!(event, Event::Error(reason) if reason == "This conversation is read-only in ZapFast"))
+            .filter(|event| matches!(event, Event::Error(reason) if reason == "This conversation is read-only in Wassup"))
             .count();
         assert_eq!(errors, 1, "skipped jobs report one error per advance");
         assert_eq!(
@@ -20042,6 +20287,12 @@ mod receipt_tests {
             commands,
             waker: Waker::default(),
             archive: Archive::in_memory().expect("archive"),
+            capture: Some(
+                crate::capture::Capture::open(&root.join("external-capture"), "fixture")
+                    .expect("capture fixture"),
+            ),
+            capture_media: None,
+            capture_monitor: None,
             client: None,
             handle: None,
             call: None,
@@ -22909,7 +23160,7 @@ mod receipt_tests {
         assert_eq!(newest.id, "theirs");
     }
 
-    /// The archive range names no id ZapFast invented: a timer notice gives
+    /// The archive range names no id Wassup invented: a timer notice gives
     /// its time, like a local call entry, but no message key.
     #[test]
     fn archive_range_leaves_timer_notices_out() {
@@ -23066,7 +23317,7 @@ mod receipt_tests {
         let archived = |worker: &Worker| worker.archive.chat(PEER).unwrap().unwrap().archived;
         worker.store_message(incoming("before", 100), None, None);
         worker.archive.set_archived_at(PEER, true, 200_000).unwrap();
-        // Kept archived, the default, as ZapFast always behaved.
+        // Kept archived, the default, as Wassup always behaved.
         worker.store_message(incoming("kept", 300), None, None);
         assert!(archived(&worker));
 

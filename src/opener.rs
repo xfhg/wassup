@@ -75,7 +75,7 @@ fn attempts(path: &Path) -> Vec<Attempt<'_>> {
 /// Opens the window's web links the way attachments and folders are opened.
 ///
 /// eframe hands `ctx.open_url` to the `webbrowser` crate, which on Linux and
-/// the BSDs starts the browser as a child of ZapFast and never waits for it,
+/// the BSDs starts the browser as a child of Wassup and never waits for it,
 /// so each clicked link left a defunct process behind until the app quit
 /// (#446). This takes every `OpenUrl` out of the frame's output before eframe
 /// sees it and opens it with `open::that_detached`, whose launcher is

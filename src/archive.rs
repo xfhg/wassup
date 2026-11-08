@@ -36,6 +36,8 @@ pub use polls::PollVote;
 pub use stars::Starred;
 pub use stickers::FavoriteSticker;
 
+pub(crate) const CAPTURE_ACCOUNT_KEY: &str = "wassup_capture_account_v1";
+
 /// Outcome of deleting or clearing a chat.
 #[derive(Clone, Debug, Default)]
 pub struct Removed {
@@ -833,6 +835,8 @@ impl Archive {
         self.mark_read_through(id, through)
     }
 
+    // The literal local-row prefixes in these SQL filters match the persisted
+    // identifiers in model.rs. Renaming them would reinterpret existing history.
     fn latest_real_message_timestamp(&self, id: &str, through: i64) -> Result<Option<i64>> {
         self.connection.query_row(
             "SELECT MAX(timestamp) FROM messages
@@ -2872,8 +2876,50 @@ impl Archive {
         Ok(())
     }
 
+    /// Commits lifecycle metadata with the same power-loss guarantee as capture.
+    /// Restore the archive's normal write policy even if the statement fails.
+    pub(crate) fn set_meta_durable(&self, key: &str, value: &str) -> Result<()> {
+        self.with_durable_write(|| self.set_meta(key, value))
+    }
+
+    pub(crate) fn reset_capture_identity_durable(&self) -> Result<()> {
+        self.with_durable_write(|| {
+            self.connection
+                .execute("DELETE FROM meta WHERE key = ?1", [CAPTURE_ACCOUNT_KEY])?;
+            Ok(())
+        })
+    }
+
+    fn with_durable_write(&self, write: impl FnOnce() -> Result<()>) -> Result<()> {
+        // Changing synchronous inside a transaction is illegal. Do not silently
+        // perform this lifecycle write under its caller's weaker transaction.
+        if !self.connection.is_autocommit() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let synchronous: i64 = self
+            .connection
+            .pragma_query_value(None, "synchronous", |row| row.get(0))?;
+        let fullfsync: i64 = self
+            .connection
+            .pragma_query_value(None, "fullfsync", |row| row.get(0))?;
+        let result = (|| {
+            self.connection
+                .pragma_update(None, "synchronous", synchronous.max(2))?;
+            self.connection.pragma_update(None, "fullfsync", true)?;
+            write()
+        })();
+        let restore_sync = self
+            .connection
+            .pragma_update(None, "synchronous", synchronous);
+        let restore_fullfsync = self.connection.pragma_update(None, "fullfsync", fullfsync);
+        result.and(restore_sync).and(restore_fullfsync)
+    }
+
     /// Clears all archived data during unlinking.
     pub fn clear(&self) -> Result<()> {
+        // A later cleanup failure must not let the next linked account append
+        // to the previous account's permanent namespace.
+        self.reset_capture_identity_durable()?;
         self.connection.execute_batch(
             "DELETE FROM poll_history; DELETE FROM poll_votes; DELETE FROM polls; DELETE FROM group_receipts; DELETE FROM messages; DELETE FROM stars; DELETE FROM motion_clips; DELETE FROM chats; DELETE FROM chat_removals; DELETE FROM message_removals; DELETE FROM pending_message_removals; DELETE FROM contacts; DELETE FROM meta; DELETE FROM lids; DELETE FROM drafts; DELETE FROM local_chat_labels; DELETE FROM local_labels; DELETE FROM removed_recent_stickers; DELETE FROM favorite_stickers; DELETE FROM favorites; DELETE FROM favorite_changes;",
         )
@@ -2902,6 +2948,86 @@ pub(crate) mod tests {
         } else {
             "DROP TRIGGER reject_message_deletion"
         }).unwrap();
+    }
+
+    #[test]
+    fn capture_identity_is_durable_and_reset_precedes_failed_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("capture-identity.db");
+        let key = [41; 32];
+        let id = "0123456789abcdef0123456789abcdef";
+        {
+            let archive = Archive::open_with_key(&path, &key).unwrap();
+            archive
+                .set_meta_durable(super::CAPTURE_ACCOUNT_KEY, id)
+                .unwrap();
+            let synchronous: i64 = archive
+                .connection
+                .pragma_query_value(None, "synchronous", |row| row.get(0))
+                .unwrap();
+            assert_eq!(synchronous, 1, "restore ordinary archive write policy");
+        }
+        {
+            let archive = Archive::open_with_key(&path, &key).unwrap();
+            assert_eq!(
+                archive.meta(super::CAPTURE_ACCOUNT_KEY).unwrap().as_deref(),
+                Some(id)
+            );
+            let chat = "1@s.whatsapp.net";
+            archive.ensure_chat(chat, "Fixture").unwrap();
+            archive
+                .insert_message(&message(chat, "kept", 100, true), None)
+                .unwrap();
+            set_message_deletion_failure(&archive, true);
+            assert!(archive.clear().is_err());
+            assert!(archive.meta(super::CAPTURE_ACCOUNT_KEY).unwrap().is_none());
+        }
+        let archive = Archive::open_with_key(&path, &key).unwrap();
+        assert!(archive.meta(super::CAPTURE_ACCOUNT_KEY).unwrap().is_none());
+    }
+
+    #[test]
+    fn capture_identity_reset_failure_stops_cleanup_and_restores_pragmas() {
+        let archive = Archive::in_memory().unwrap();
+        archive
+            .set_meta(super::CAPTURE_ACCOUNT_KEY, "old-id")
+            .unwrap();
+        archive.ensure_chat("1@s.whatsapp.net", "Fixture").unwrap();
+        archive
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER reject_capture_reset BEFORE DELETE ON meta
+             WHEN OLD.key = 'wassup_capture_account_v1'
+             BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;",
+            )
+            .unwrap();
+        let before: (i64, i64) = (
+            archive
+                .connection
+                .pragma_query_value(None, "synchronous", |r| r.get(0))
+                .unwrap(),
+            archive
+                .connection
+                .pragma_query_value(None, "fullfsync", |r| r.get(0))
+                .unwrap(),
+        );
+        assert!(archive.clear().is_err());
+        assert_eq!(
+            archive.meta(super::CAPTURE_ACCOUNT_KEY).unwrap().as_deref(),
+            Some("old-id")
+        );
+        assert!(archive.chat("1@s.whatsapp.net").unwrap().is_some());
+        let after: (i64, i64) = (
+            archive
+                .connection
+                .pragma_query_value(None, "synchronous", |r| r.get(0))
+                .unwrap(),
+            archive
+                .connection
+                .pragma_query_value(None, "fullfsync", |r| r.get(0))
+                .unwrap(),
+        );
+        assert_eq!(after, before);
     }
 
     /// Failed unlink cannot apply the previous account's terminal barriers.
@@ -5581,7 +5707,7 @@ pub(crate) mod tests {
         assert_eq!(archive.chat(chat).expect("chat").expect("exists").unread, 0);
     }
 
-    /// The local rows ZapFast invents (call entries, disappearing-timer
+    /// The local rows Wassup invents (call entries, disappearing-timer
     /// notices) have no counterpart on the phone: a receipt for their id would
     /// name a message the phone never sent, and a history anchor for one would
     /// ask for something it does not hold.

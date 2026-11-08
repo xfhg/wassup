@@ -506,7 +506,7 @@ impl App {
             // Behind the app lock the desktop learns that a call came, and
             // nothing about who is calling.
             (
-                "ZapFast".to_owned(),
+                "Wassup".to_owned(),
                 crate::i18n::gettext(self.locale, "Incoming call").into_owned(),
                 None,
             )
@@ -547,7 +547,7 @@ impl App {
         );
     }
 
-    /// A group call ZapFast cannot join yet (`calls::GROUP_CALLS_ENABLED` is
+    /// A group call Wassup cannot join yet (`calls::GROUP_CALLS_ENABLED` is
     /// off), from the backend of the account being handled. It never takes
     /// the call screen and never rings here: while it rings on the phone the
     /// window says who is calling and to answer there, in a notification and
@@ -575,7 +575,7 @@ impl App {
         }
         let (title, body, picture) = if self.app_lock.is_locked() {
             (
-                "ZapFast".to_owned(),
+                "Wassup".to_owned(),
                 crate::i18n::gettext(self.locale, "Incoming call").into_owned(),
                 None,
             )
@@ -617,7 +617,7 @@ impl App {
         if crate::model::ChatKind::from_id(&update.chat) == crate::model::ChatKind::Group {
             crate::i18n::gettext(
                 self.locale,
-                "{caller} is calling {group}. ZapFast can't join group calls yet: answer on your phone.",
+                "{caller} is calling {group}. Wassup can't join group calls yet: answer on your phone.",
             )
             .replace("{caller}", &caller)
             .replace("{group}", &self.chat_title_of(&update.chat))
@@ -625,7 +625,7 @@ impl App {
             // A call among several people with no group behind it.
             crate::i18n::gettext(
                 self.locale,
-                "{caller} is calling you and others. ZapFast can't join group calls yet: answer on your phone.",
+                "{caller} is calling you and others. Wassup can't join group calls yet: answer on your phone.",
             )
             .replace("{caller}", &caller)
         }
@@ -998,7 +998,7 @@ mod tests {
 
     /// A call link from a message is joined here rather than opened in the browser, and is
     /// drawn at once under the link's name, with no chat behind it.
-    /// A group call ZapFast cannot join yet never takes the screen or rings:
+    /// A group call Wassup cannot join yet never takes the screen or rings:
     /// the desktop and the window say who is calling which group, and to
     /// answer on the phone, and the notification goes once the call is over.
     #[test]
@@ -1027,7 +1027,7 @@ mod tests {
             "nothing is declined: {sent:?}"
         );
         let said =
-            "Ada is calling Book club. ZapFast can't join group calls yet: answer on your phone.";
+            "Ada is calling Book club. Wassup can't join group calls yet: answer on your phone.";
         assert_eq!(app.notifications.shown.len(), 1);
         assert_eq!(app.notifications.shown[0].title, "Book club");
         assert_eq!(app.notifications.shown[0].body, said);
