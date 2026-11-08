@@ -382,6 +382,23 @@ pub enum Command {
         request: u64,
         before: Option<i64>,
     },
+    LoadDeletedContext {
+        request: u64,
+        anchors: Vec<i64>,
+    },
+    LoadDeletedHistory {
+        request: u64,
+        chat: ChatId,
+        message: String,
+        after: i64,
+    },
+    /// Internal background projection; the worker rechecks current privacy.
+    DeletedContextReady {
+        request: u64,
+        generation: u64,
+        rows: Vec<RetainedMessage>,
+        failed: bool,
+    },
     /// Asks for the starred messages.
     LoadStarred,
     /// Result of a star or unstar request.
@@ -1208,10 +1225,22 @@ pub struct DeletedMessage {
     pub reason: String,
 }
 
+/// A deleted original or an ordinary neighbor in a merged context window.
+/// An empty removal reason marks ordinary context; anchors alone count in lists.
+#[derive(Clone, Debug)]
+pub struct RetainedMessage {
+    pub message: DeletedMessage,
+    pub anchor: bool,
+    pub gap_before: bool,
+    pub missing_before: bool,
+    pub missing_after: bool,
+}
+
 /// The account worker rechecks every source chat after the native picker closes.
 #[derive(Clone, Debug)]
 pub enum CaptureExportSelection {
     Chats(Vec<ChatId>),
+    DeletedChat(ChatId),
     Attachment { chat: ChatId, path: PathBuf },
 }
 
@@ -1229,6 +1258,20 @@ pub enum Event {
         request: u64,
         messages: Vec<DeletedMessage>,
         next_before: Option<i64>,
+        error: Option<String>,
+    },
+    DeletedContextLoaded {
+        request: u64,
+        rows: Vec<RetainedMessage>,
+        error: Option<String>,
+    },
+    DeletedHistoryLoaded {
+        request: u64,
+        chat: ChatId,
+        message: String,
+        after: i64,
+        observations: Vec<crate::capture::view::SavedObservation>,
+        has_more: bool,
         error: Option<String>,
     },
     Blocklist {

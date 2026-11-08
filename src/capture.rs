@@ -129,6 +129,8 @@ impl Capture {
              );
              CREATE INDEX IF NOT EXISTS events_page ON events(chat,month,sequence);
              CREATE INDEX IF NOT EXISTS events_observed ON events(observed_at);
+             CREATE INDEX IF NOT EXISTS events_chronology ON events(chat,sent_at,sequence)
+               WHERE kind IN ('message','outgoing_pending');
              CREATE INDEX IF NOT EXISTS events_message ON events(chat,message_id,kind,sequence);
              CREATE INDEX IF NOT EXISTS events_target ON events(chat,target_id,sequence);
              CREATE TABLE IF NOT EXISTS media_jobs (

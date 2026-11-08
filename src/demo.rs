@@ -2017,6 +2017,91 @@ fn starred_sample(app: &mut App, menu: Option<&str>) {
     app.open_list_menu = menu.map(|id| (chat, id.to_owned()));
 }
 
+/// Offline journal neighborhood fixture, independent of any linked account.
+fn deleted_context_fixture(app: &mut App) {
+    use crate::backend::RetainedMessage;
+    let anchors = crate::ui::deleted::selected_anchor_sequences(app);
+    let mut chats =
+        std::collections::BTreeMap::<String, Vec<crate::backend::DeletedMessage>>::new();
+    for original in &app.deleted_messages {
+        let timeline = chats.entry(original.canonical_chat.clone()).or_default();
+        for after in [false, true] {
+            // The group's two deleted originals are consecutive messages.
+            if original.canonical_chat == SAMPLES[1].id
+                && ((!after && original.saved.sequence == 5)
+                    || (after && original.saved.sequence == 4))
+            {
+                continue;
+            }
+            let mut context = original.clone();
+            context.reason.clear();
+            context.saved.sequence = 100 + original.saved.sequence * 2 + i64::from(after);
+            context.saved.message_id = format!("demo-context-{}", context.saved.sequence);
+            context.saved.sent_at += if after { 60 } else { -60 };
+            context.saved.observed_at = context.saved.sent_at;
+            context.saved.text = if after {
+                "Let's keep the original for comparison."
+            } else {
+                "Here is the sketch we discussed."
+            }
+            .into();
+            context.saved.history.clear();
+            context.saved.history_truncated = false;
+            context.saved.deletion_observed = false;
+            context.saved.attachments.clear();
+            if original.canonical_chat == SAMPLES[1].id {
+                context.sender_id = SAMPLES[2].id.into();
+                context.sender_name = "Grace Hopper".into();
+                context.saved.sender = SAMPLES[2].id.into();
+                context.saved.outgoing = false;
+            } else {
+                context.saved.outgoing = !original.saved.outgoing;
+                context.sender_id = if context.saved.outgoing {
+                    ME
+                } else {
+                    SAMPLES[0].id
+                }
+                .into();
+                context.saved.sender = context.sender_id.clone();
+                context.sender_name = if context.saved.outgoing {
+                    "You"
+                } else {
+                    "Ada Lovelace"
+                }
+                .into();
+            }
+            timeline.push(context);
+        }
+        timeline.push(original.clone());
+    }
+    let mut rows = Vec::new();
+    for timeline in chats.values_mut() {
+        timeline.sort_by_key(|row| (row.saved.sent_at, row.saved.sequence));
+        let mut included = std::collections::BTreeSet::new();
+        for (index, row) in timeline.iter().enumerate() {
+            if anchors.contains(&row.saved.sequence) {
+                included.extend(index.saturating_sub(1)..=(index + 1).min(timeline.len() - 1));
+            }
+        }
+        let mut previous = None;
+        for index in included {
+            rows.push(RetainedMessage {
+                message: timeline[index].clone(),
+                anchor: anchors.contains(&timeline[index].saved.sequence),
+                gap_before: previous.is_some_and(|previous| previous + 1 != index),
+                missing_before: anchors.contains(&timeline[index].saved.sequence) && index == 0,
+                missing_after: anchors.contains(&timeline[index].saved.sequence)
+                    && index + 1 == timeline.len(),
+            });
+            previous = Some(index);
+        }
+    }
+    app.deleted_context_anchors = anchors;
+    app.deleted_context_scope = crate::ui::deleted::selected_context_scope(app);
+    app.deleted_context = rows;
+    app.deleted_context_loading = false;
+}
+
 /// Configures synthetic offline demo states and appearance for tests and screenshots.
 /// Audio fixtures vary voice-note and forwarding metadata independently without playback.
 pub fn apply_flags(app: &mut App, page: Option<&str>) {
@@ -2624,12 +2709,25 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 app.typing.clear();
                 app.scroll_to_bottom = true;
             }
-            "deleted" | "deleted-list" => {
+            "deleted" | "deleted-list" | "deleted-sender" | "deleted-group" => {
                 use crate::capture::view::{SavedMessage, SavedObservation};
                 app.page = Page::Deleted;
                 app.deleted_loading = false;
                 app.deleted_has_more = false;
                 app.deleted_selected_sender = Some(SAMPLES[0].id.to_owned());
+                app.deleted_selected_chat = Some(
+                    if part == "deleted-group" {
+                        SAMPLES[1].id
+                    } else {
+                        SAMPLES[0].id
+                    }
+                    .to_owned(),
+                );
+                app.deleted_grouping = if part == "deleted-sender" {
+                    crate::model::DeletedGrouping::Sender
+                } else {
+                    crate::model::DeletedGrouping::Chat
+                };
                 app.deleted_show_thread = part != "deleted-list";
                 let now = crate::util::now();
                 let entries = [
@@ -2737,6 +2835,7 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                         }
                     })
                     .collect();
+                deleted_context_fixture(app);
             }
             "settings" => app.page = Page::Settings,
             choice if choice.starts_with("settings-search=") => {
@@ -9822,6 +9921,9 @@ mod tests {
             "disappearing-readonly-group",
             "deleted",
             "deleted,light",
+            "deleted-sender",
+            "deleted-group",
+            "deleted,theme=Nord.json",
             "deleted-list",
             "deleted-list,light",
             "settings",
@@ -10013,6 +10115,9 @@ mod tests {
         for page in [
             "deleted",
             "deleted,light",
+            "deleted-sender",
+            "deleted-group",
+            "deleted,theme=Nord.json",
             "deleted-list",
             "deleted-list,light",
         ] {
@@ -25912,29 +26017,299 @@ mod rail_tests {
             .nodes
             .iter()
             .filter_map(|(_, node)| node.label())
-            .filter(|label| label.contains(", ") && label.contains(" saved message"))
+            .filter(|label| label.contains(", ") && label.contains(" deleted message"))
             .map(str::to_owned)
             .collect()
     }
 
     #[test]
-    fn deleted_senders_combine_six_originals_with_chat_and_day_context() {
-        let (mut app, ctx) = open("deleted", false);
-        assert_eq!(app.deleted_messages.len(), 6);
+    fn deleted_defaults_to_chats_and_keeps_group_participants_together() {
+        let (mut app, ctx) = open("deleted-group", false);
+        assert_eq!(app.deleted_grouping, crate::model::DeletedGrouping::Chat);
         let labels = deleted_sender_labels(&mut app, &ctx, 1180.0);
-        assert_eq!(labels.len(), 3, "one visible row per sender: {labels:?}");
+        assert_eq!(labels.len(), 3);
         for prefix in [
-            "Ada Lovelace, 3 saved messages, ",
-            "You, 2 saved messages, ",
-            "Grace Hopper, 1 saved message, ",
+            "Ada Lovelace, 3 deleted messages, ",
+            "Rust Berlin, 2 deleted messages, ",
+            "Grace Hopper, 1 deleted message, ",
         ] {
             assert!(
                 labels.iter().any(|label| label.starts_with(prefix)),
                 "{prefix}: {labels:?}"
             );
         }
-        let drawn = frame_at(&mut app, &ctx, egui::vec2(1180.0, 1000.0), Vec::new());
-        assert!(drawn.contains(&"3 saved messages · independent copies".to_owned()));
+        assert_eq!(app.deleted_context_anchors, [4, 5]);
+        assert_eq!(
+            app.deleted_context.len(),
+            4,
+            "two consecutive deletions share their surrounding context"
+        );
+        let drawn = frame_at(&mut app, &ctx, egui::vec2(1180.0, 1800.0), Vec::new());
+        assert_eq!(
+            drawn
+                .iter()
+                .filter(|text| text.as_str() == "Export chat")
+                .count(),
+            1
+        );
+        assert!(
+            !drawn
+                .iter()
+                .any(|text| text.starts_with("Details") || text == "Export transcript")
+        );
+        assert_eq!(
+            drawn
+                .iter()
+                .filter(|text| text.as_str() == "Deleted")
+                .count(),
+            2
+        );
+        assert_eq!(
+            drawn
+                .iter()
+                .filter(|text| text.as_str() == "Context")
+                .count(),
+            2
+        );
+        assert!(drawn.contains(&"Meet at the library at 18:00?".to_owned()));
+        assert!(
+            drawn.contains(&"Meet at the library at 18:30?".to_owned()),
+            "revision is visible without disclosure"
+        );
+        assert!(drawn.contains(&"See you there.".to_owned()));
+        assert!(
+            drawn.contains(&"Grace Hopper".to_owned()),
+            "context can come from another group participant"
+        );
+    }
+
+    #[test]
+    fn deleted_sender_mode_exports_each_source_chat_once() {
+        let (mut app, ctx) = open("deleted-sender", false);
+        let drawn = frame_at(&mut app, &ctx, egui::vec2(1180.0, 3000.0), Vec::new());
+        assert_eq!(
+            drawn
+                .iter()
+                .filter(|text| text.as_str() == "Export chat")
+                .count(),
+            2
+        );
+        assert!(
+            drawn.contains(&"See you there.".to_owned()),
+            "another sender's adjacent deletion remains visible"
+        );
+        assert_eq!(
+            app.deleted_context.iter().filter(|row| row.anchor).count(),
+            3
+        );
+        assert!(
+            app.deleted_context
+                .iter()
+                .any(|row| !row.anchor && !row.message.reason.is_empty())
+        );
+    }
+
+    #[test]
+    fn deleted_grouping_control_switches_parent_entity_without_changing_counts() {
+        let (mut app, ctx) = open("deleted-group", false);
+        let sender = focus::named_button(&ctx, "Group deleted by Sender")
+            .and_then(|id| ctx.read_response(id))
+            .expect("sender grouping control")
+            .rect
+            .center();
+        click(&mut app, &ctx, 1180.0, sender);
+        assert_eq!(app.deleted_grouping, crate::model::DeletedGrouping::Sender);
+        let labels = deleted_sender_labels(&mut app, &ctx, 1180.0);
+        assert_eq!(labels.len(), 3);
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.starts_with("You, 2 deleted messages, "))
+        );
+        let chat = focus::named_button(&ctx, "Group deleted by Chat")
+            .and_then(|id| ctx.read_response(id))
+            .expect("chat grouping control")
+            .rect
+            .center();
+        click(&mut app, &ctx, 1180.0, chat);
+        assert_eq!(app.deleted_grouping, crate::model::DeletedGrouping::Chat);
+        assert_eq!(
+            app.deleted_messages.len(),
+            6,
+            "switching does not add context to the deletion list"
+        );
+    }
+
+    #[test]
+    fn deleted_chat_header_and_export_stay_separate_at_narrow_width() {
+        let (mut app, ctx) = open("deleted-group", true);
+        frame(&mut app, &ctx, 420.0, Vec::new());
+        let account = app.account().id.as_str().to_owned();
+        let row = ctx
+            .read_response(crate::ui::deleted::chat_row_id(&account, SAMPLES[1].id))
+            .expect("group chat row")
+            .rect
+            .center();
+        click(&mut app, &ctx, 420.0, row);
+        let back = focus::named_button(&ctx, "Back to deleted chats")
+            .and_then(|id| ctx.read_response(id))
+            .expect("back navigation")
+            .rect;
+        let export = focus::named_button(&ctx, &format!("Export deleted chat {}", SAMPLES[1].id))
+            .and_then(|id| ctx.read_response(id))
+            .expect("chat export")
+            .rect;
+        assert!(
+            export.top() >= back.bottom(),
+            "export has its own row: {export:?}, {back:?}"
+        );
+        assert!(export.left() >= 0.0 && export.right() <= 420.0);
+        let drawn = frame_at(&mut app, &ctx, egui::vec2(420.0, 1800.0), Vec::new());
+        assert_eq!(
+            drawn
+                .iter()
+                .filter(|text| text.as_str() == "Export chat")
+                .count(),
+            1
+        );
+        assert!(!drawn.iter().any(|text| text.starts_with("Details")));
+    }
+
+    #[test]
+    fn deleted_pending_anchor_changes_keep_history_without_leaking_narrowed_context() {
+        let (mut app, ctx) = open("deleted", false);
+        let tail = crate::capture::view::SavedObservation {
+            sequence: 900,
+            kind: "edited".into(),
+            text: "Paged revision beyond the initial history window.".into(),
+            sender: SAMPLES[0].id.into(),
+            sent_at: crate::util::now(),
+            observed_at: crate::util::now(),
+            source: "durable_inbound".into(),
+            attachments: Vec::new(),
+        };
+        app.deleted_context
+            .iter_mut()
+            .find(|row| row.message.saved.sequence == 1)
+            .unwrap()
+            .message
+            .saved
+            .history
+            .push(tail.clone());
+        let mut added = app
+            .deleted_messages
+            .iter()
+            .find(|row| row.saved.sequence == 6)
+            .unwrap()
+            .clone();
+        added.saved.sequence = 20;
+        added.saved.message_id = "demo-retained-new".into();
+        added.saved.text = "New deletion while reading".into();
+        added.saved.sent_at += 120;
+        app.deleted_messages.push(added);
+        app.deleted_context_anchors = crate::ui::deleted::selected_anchor_sequences(&app);
+        app.deleted_context_loading = true;
+        let expanded = frame_at(&mut app, &ctx, egui::vec2(1180.0, 4000.0), Vec::new());
+        assert!(expanded.contains(&tail.text));
+        assert!(expanded.contains(&"New deletion while reading".to_owned()));
+        assert!(
+            expanded.iter().any(|text| text == "Context"),
+            "existing context remains while the wider projection loads"
+        );
+
+        app.deleted_query = "original sketch".into();
+        app.deleted_context_anchors = crate::ui::deleted::selected_anchor_sequences(&app);
+        let narrowed = frame_at(&mut app, &ctx, egui::vec2(1180.0, 1800.0), Vec::new());
+        assert!(
+            narrowed.contains(&tail.text),
+            "narrowing does not collapse already read revisions"
+        );
+        assert!(!narrowed.iter().any(|text| text == "Context"));
+        assert!(!narrowed.contains(&"New deletion while reading".to_owned()));
+
+        app.deleted_query.clear();
+        app.deleted_selected_chat = Some(SAMPLES[2].id.into());
+        let other_chat = frame_at(&mut app, &ctx, egui::vec2(1180.0, 1800.0), Vec::new());
+        assert!(!other_chat.contains(&tail.text));
+        assert!(!other_chat.iter().any(|text| text == "Context"));
+    }
+
+    #[test]
+    fn deleted_context_refresh_preserves_the_message_being_read_after_scrolling() {
+        let (mut app, ctx) = open("deleted", false);
+        frame(
+            &mut app,
+            &ctx,
+            1180.0,
+            vec![
+                egui::Event::PointerMoved(egui::pos2(800.0, 500.0)),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -320.0),
+                    modifiers: egui::Modifiers::NONE,
+                    phase: egui::TouchPhase::Move,
+                },
+            ],
+        );
+        for _ in 0..25 {
+            frame(&mut app, &ctx, 1180.0, Vec::new());
+        }
+        let account = app.account().id.as_str().to_owned();
+        let before = crate::ui::deleted::viewport_anchor(
+            &ctx,
+            &account,
+            crate::model::DeletedGrouping::Chat,
+            SAMPLES[0].id,
+        )
+        .expect("visible message after scrolling");
+        let mut earlier = app
+            .deleted_context
+            .iter()
+            .find(|row| row.message.canonical_chat == SAMPLES[0].id)
+            .unwrap()
+            .clone();
+        earlier.message.saved.message_id = "late-earlier-context".into();
+        earlier.message.saved.sequence = 900;
+        earlier.message.saved.sent_at -= 500;
+        earlier.message.saved.text = "Earlier context arrived while reading.\nThis new row must not move the message already on screen.".into();
+        earlier.anchor = false;
+        earlier.message.reason.clear();
+        app.deleted_context.push(earlier);
+        for _ in 0..3 {
+            frame(&mut app, &ctx, 1180.0, Vec::new());
+        }
+        let after = crate::ui::deleted::viewport_anchor(
+            &ctx,
+            &account,
+            crate::model::DeletedGrouping::Chat,
+            SAMPLES[0].id,
+        )
+        .expect("same visible message after refresh");
+        assert_eq!((&before.0, &before.1), (&after.0, &after.1));
+        assert!(
+            (before.2 - after.2).abs() < 1.0,
+            "the reading position remains stable: {before:?}, {after:?}"
+        );
+    }
+
+    #[test]
+    fn deleted_senders_combine_six_originals_with_chat_and_day_context() {
+        let (mut app, ctx) = open("deleted-sender", false);
+        assert_eq!(app.deleted_messages.len(), 6);
+        let labels = deleted_sender_labels(&mut app, &ctx, 1180.0);
+        assert_eq!(labels.len(), 3, "one visible row per sender: {labels:?}");
+        for prefix in [
+            "Ada Lovelace, 3 deleted messages, ",
+            "You, 2 deleted messages, ",
+            "Grace Hopper, 1 deleted message, ",
+        ] {
+            assert!(
+                labels.iter().any(|label| label.starts_with(prefix)),
+                "{prefix}: {labels:?}"
+            );
+        }
+        let drawn = frame_at(&mut app, &ctx, egui::vec2(1180.0, 3000.0), Vec::new());
+        assert!(drawn.contains(&"3 deleted messages".to_owned()));
         assert!(
             drawn.contains(&"Rust Berlin".to_owned()),
             "the group source is shown beside Ada's direct-chat copies"
@@ -25959,7 +26334,7 @@ mod rail_tests {
 
     #[test]
     fn deleted_sender_counts_and_threads_exclude_newly_locked_chats() {
-        let (mut app, ctx) = open("deleted", false);
+        let (mut app, ctx) = open("deleted-sender", false);
         for chat in &mut app.chats {
             if chat.id == SAMPLES[1].id || chat.id == SAMPLES[2].id {
                 chat.locked = true;
@@ -25971,7 +26346,10 @@ mod rail_tests {
             2,
             "Grace's locked chat contributes no sender row: {labels:?}"
         );
-        for prefix in ["Ada Lovelace, 2 saved messages, ", "You, 1 saved message, "] {
+        for prefix in [
+            "Ada Lovelace, 2 deleted messages, ",
+            "You, 1 deleted message, ",
+        ] {
             assert!(
                 labels.iter().any(|label| label.starts_with(prefix)),
                 "{prefix}: {labels:?}"
@@ -25983,7 +26361,7 @@ mod rail_tests {
                 .any(|label| label.starts_with("Grace Hopper, "))
         );
         let drawn = frame_at(&mut app, &ctx, egui::vec2(1180.0, 780.0), Vec::new());
-        assert!(drawn.contains(&"2 saved messages · independent copies".to_owned()));
+        assert!(drawn.contains(&"2 deleted messages".to_owned()));
         assert!(!drawn.contains(&"Rust Berlin".to_owned()));
         for row in app.deleted_messages.iter().filter(|row| {
             row.canonical_chat == SAMPLES[1].id || row.canonical_chat == SAMPLES[2].id
@@ -26002,7 +26380,7 @@ mod rail_tests {
 
     #[test]
     fn deleted_sender_selection_and_narrow_back_follow_pointer_input() {
-        let (mut app, ctx) = open("deleted", false);
+        let (mut app, ctx) = open("deleted-sender", false);
         let account = app.account().id.as_str().to_owned();
         let grace = ctx
             .read_response(crate::ui::deleted::sender_row_id(&account, SAMPLES[2].id))
@@ -26012,7 +26390,7 @@ mod rail_tests {
         click(&mut app, &ctx, 1180.0, grace);
         assert_eq!(app.deleted_selected_sender.as_deref(), Some(SAMPLES[2].id));
         let drawn = frame_at(&mut app, &ctx, egui::vec2(1180.0, 780.0), Vec::new());
-        assert!(drawn.contains(&"1 saved message · independent copies".to_owned()));
+        assert!(drawn.contains(&"1 deleted message".to_owned()));
         let ada_oldest = app
             .deleted_messages
             .iter()
@@ -26036,7 +26414,7 @@ mod rail_tests {
         assert!(app.deleted_show_thread);
         assert_eq!(app.deleted_selected_sender.as_deref(), Some(SAMPLES[0].id));
         let drawn = frame_at(&mut app, &ctx, egui::vec2(420.0, 780.0), Vec::new());
-        assert!(drawn.contains(&"3 saved messages · independent copies".to_owned()));
+        assert!(drawn.contains(&"3 deleted messages".to_owned()));
         assert!(
             !drawn.contains(&"Deleted messages".to_owned()),
             "the narrow thread replaces the list"

@@ -29,6 +29,7 @@ impl Worker {
     /// The protocol can report a successful sync even when our local write failed.
     /// Withhold permanent data until a fresh recovery persists its lock updates.
     pub(super) fn capture_lock_write_failed(&mut self) {
+        self.deleted_context.cancel();
         self.privacy_confirmed = false;
         self.privacy_write_failed = true;
         self.privacy_snapshot = true;
@@ -88,6 +89,7 @@ impl Worker {
         );
         let requested = match selection {
             CaptureExportSelection::Chats(chats) => chats.as_slice(),
+            CaptureExportSelection::DeletedChat(chat) => std::slice::from_ref(chat),
             CaptureExportSelection::Attachment { chat, .. } => std::slice::from_ref(chat),
         };
         anyhow::ensure!(
@@ -168,6 +170,9 @@ impl Worker {
                 CaptureExportSelection::Chats(_) => rfd::FileDialog::new()
                     .set_title("Choose a folder for a plaintext archive export")
                     .pick_folder(),
+                CaptureExportSelection::DeletedChat(_) => rfd::FileDialog::new()
+                    .set_title("Export chat deletions and context as plaintext")
+                    .pick_folder(),
                 CaptureExportSelection::Attachment { path, .. } => rfd::FileDialog::new()
                     .set_title("Save a plaintext attachment copy")
                     .set_file_name(
@@ -231,55 +236,87 @@ impl Worker {
             .unwrap_or(capture.root())
             .to_path_buf();
         let roots = [self.dirs.state.clone(), self.dirs.cache.clone()];
+        let archive_path = self.dirs.archive_db();
+        let identity = self.deleted_identity();
+        let syncing = self.syncing;
         let commands = self.commands.clone();
         let job = self.capture_export.job.as_mut().expect("current export");
         job.chats = chats.clone();
         job.task = Some(tokio::task::spawn_blocking(move || {
-            let outcome = (|| -> anyhow::Result<PathBuf> {
-                anyhow::ensure!(!cancelled.load(Ordering::Acquire), "Export cancelled");
-                let parent = match &selection {
-                    CaptureExportSelection::Chats(_) => target.as_path(),
-                    CaptureExportSelection::Attachment { .. } => target
-                        .parent()
-                        .ok_or_else(|| anyhow::anyhow!("Choose a folder"))?,
-                }
-                .canonicalize()?;
-                anyhow::ensure!(
-                    !parent.starts_with(&encrypted_root),
-                    "Choose a folder outside the encrypted archive"
-                );
-                for root in &roots {
-                    let root = root.parent().and_then(Path::parent).unwrap_or(root);
-                    if let Ok(root) = root.canonicalize() {
-                        anyhow::ensure!(
-                            !parent.starts_with(root),
-                            "Choose a folder outside application data"
-                        );
+            let outcome =
+                (|| -> anyhow::Result<PathBuf> {
+                    anyhow::ensure!(!cancelled.load(Ordering::Acquire), "Export cancelled");
+                    let parent = match &selection {
+                        CaptureExportSelection::Chats(_)
+                        | CaptureExportSelection::DeletedChat(_) => target.as_path(),
+                        CaptureExportSelection::Attachment { .. } => target
+                            .parent()
+                            .ok_or_else(|| anyhow::anyhow!("Choose a folder"))?,
                     }
-                }
-                anyhow::ensure!(!cancelled.load(Ordering::Acquire), "Export cancelled");
-                let destination = match &selection {
-                    CaptureExportSelection::Chats(_) => parent.join(format!(
-                        "Wassup export-{}-{:08x}",
-                        crate::util::now(),
-                        rand::random::<u32>()
-                    )),
-                    CaptureExportSelection::Attachment { .. } => parent.join(
-                        target
-                            .file_name()
-                            .ok_or_else(|| anyhow::anyhow!("Choose a file name"))?,
-                    ),
-                };
-                match selection {
-                    CaptureExportSelection::Chats(_) => {
-                        capture.export_readable_cancellable(&destination, &chats, &cancelled)?
+                    .canonicalize()?;
+                    anyhow::ensure!(
+                        !parent.starts_with(&encrypted_root),
+                        "Choose a folder outside the encrypted archive"
+                    );
+                    for root in &roots {
+                        let root = root.parent().and_then(Path::parent).unwrap_or(root);
+                        if let Ok(root) = root.canonicalize() {
+                            anyhow::ensure!(
+                                !parent.starts_with(root),
+                                "Choose a folder outside application data"
+                            );
+                        }
                     }
-                    CaptureExportSelection::Attachment { path, .. } => {
-                        capture.export_attachment_cancellable(&path, &destination, &cancelled)?
+                    anyhow::ensure!(!cancelled.load(Ordering::Acquire), "Export cancelled");
+                    let destination = match &selection {
+                        CaptureExportSelection::Chats(_)
+                        | CaptureExportSelection::DeletedChat(_) => parent.join(format!(
+                            "Wassup export-{}-{:08x}",
+                            crate::util::now(),
+                            rand::random::<u32>()
+                        )),
+                        CaptureExportSelection::Attachment { .. } => parent.join(
+                            target
+                                .file_name()
+                                .ok_or_else(|| anyhow::anyhow!("Choose a file name"))?,
+                        ),
+                    };
+                    match selection {
+                        CaptureExportSelection::Chats(_) => {
+                            capture.export_readable_cancellable(&destination, &chats, &cancelled)?
+                        }
+                        CaptureExportSelection::DeletedChat(chat) => {
+                            let archive = Archive::export_reader(&archive_path)?;
+                            let _snapshot = archive.read_snapshot()?;
+                            let rows = super::deleted::project_deleted_chat(
+                                &capture,
+                                &archive,
+                                &identity,
+                                &chat,
+                                super::deleted::ProjectionOptions {
+                                    anchors: None,
+                                    syncing,
+                                    now: crate::util::now(),
+                                    full_history: true,
+                                    cancelled: &cancelled,
+                                },
+                            )?;
+                            let title = rows
+                                .first()
+                                .map(|row| row.message.chat_name.as_str())
+                                .unwrap_or("Saved chat deletions");
+                            capture.export_deleted_readable_cancellable(
+                                &destination,
+                                title,
+                                &rows,
+                                &cancelled,
+                            )?;
+                        }
+                        CaptureExportSelection::Attachment { path, .. } => capture
+                            .export_attachment_cancellable(&path, &destination, &cancelled)?,
                     }
-                }
-                Ok(destination)
-            })();
+                    Ok(destination)
+                })();
             let result = match outcome {
                 Ok(path) => Ok(Some(path)),
                 Err(_) if cancelled.load(Ordering::Acquire) => Ok(None),
@@ -309,7 +346,7 @@ impl Worker {
 
 #[cfg(test)]
 mod tests {
-    use super::super::receipt_tests::{PEER, worker};
+    use super::super::receipt_tests::{PEER, own_message, worker};
     use super::*;
 
     fn job(request: u64, chat: &str) -> Job {
@@ -320,6 +357,136 @@ mod tests {
             cancelled: Arc::new(AtomicBool::new(false)),
             task: None,
         }
+    }
+
+    #[test]
+    fn deleted_chat_export_uses_all_chat_deletions_and_shared_context() {
+        let (worker, _, _, _) = worker();
+        let chat = "500@g.us";
+        worker.archive.ensure_chat(chat, "Synthetic group").unwrap();
+        let capture = worker.capture.as_ref().unwrap();
+        for index in 0..114 {
+            let id = format!("message-{index}");
+            let text = format!("Synthetic message {index}.");
+            let sender = if index % 2 == 0 {
+                "111@s.whatsapp.net"
+            } else {
+                "222@s.whatsapp.net"
+            };
+            capture
+                .record_event(crate::capture::CaptureEvent {
+                    event_id: id.clone(),
+                    chat: chat.into(),
+                    sender: sender.into(),
+                    message_id: id.clone(),
+                    kind: "message".into(),
+                    text: text.clone(),
+                    timestamp: 1000 + index,
+                    direction: "incoming".into(),
+                    source: "synthetic".into(),
+                    raw: wa::Message::text(text).encode_to_vec(),
+                    ..Default::default()
+                })
+                .unwrap();
+            if (2..112).contains(&index) {
+                worker.archive.delete_message(chat, &id).unwrap();
+            } else {
+                let mut message = own_message(&id, 1000 + index);
+                message.chat = chat.into();
+                message.sender = sender.into();
+                message.from_me = false;
+                worker.archive.insert_message(&message, None).unwrap();
+            }
+        }
+        for index in 0..300 {
+            capture
+                .record_event(crate::capture::CaptureEvent {
+                    event_id: format!("edit-{index}"),
+                    chat: chat.into(),
+                    message_id: format!("edit-{index}"),
+                    target_id: Some("message-2".into()),
+                    sender: "111@s.whatsapp.net".into(),
+                    kind: "edited".into(),
+                    text: format!("Synthetic revision {index}."),
+                    timestamp: 2000 + index,
+                    direction: "incoming".into(),
+                    source: "synthetic".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        let cancelled = AtomicBool::new(false);
+        let rows = super::super::deleted::project_deleted_chat(
+            capture,
+            &worker.archive,
+            &worker.deleted_identity(),
+            chat,
+            super::super::deleted::ProjectionOptions {
+                anchors: None,
+                syncing: false,
+                now: crate::util::now(),
+                full_history: true,
+                cancelled: &cancelled,
+            },
+        )
+        .unwrap();
+        assert_eq!(rows.iter().filter(|row| row.anchor).count(), 110);
+        assert_eq!(rows.len(), 112);
+        assert_eq!(rows.first().unwrap().message.saved.message_id, "message-1");
+        assert_eq!(rows.last().unwrap().message.saved.message_id, "message-112");
+        let edited = rows
+            .iter()
+            .find(|row| row.message.saved.message_id == "message-2")
+            .unwrap();
+        assert_eq!(edited.message.saved.history.len(), 300);
+        assert!(!edited.message.saved.history_truncated);
+        let output = tempfile::tempdir().unwrap();
+        let destination = output.path().join("export");
+        capture
+            .export_deleted_readable_cancellable(&destination, "Synthetic group", &rows, &cancelled)
+            .unwrap();
+        let transcript = std::fs::read_to_string(destination.join("chat.md")).unwrap();
+        assert!(!transcript.contains("Synthetic message 0."));
+        assert!(!transcript.contains("Synthetic message 113."));
+        assert!(transcript.contains("Synthetic message 1."));
+        assert!(transcript.contains("Synthetic message 112."));
+        assert!(transcript.contains("Synthetic revision 299."));
+        assert_eq!(transcript.matches(" · Deleted\n").count(), 110);
+        assert_eq!(transcript.matches(" · Context\n").count(), 2);
+    }
+
+    #[test]
+    fn deleted_chat_export_checks_alias_locks_and_cancels_before_writing() {
+        let (mut worker, events, _, _) = worker();
+        worker.chat_export.allowed = true;
+        let selection = CaptureExportSelection::DeletedChat(PEER.into());
+        assert!(worker.capture_export_chats(&selection).is_err());
+        worker.archive.ensure_chat(PEER, "Synthetic chat").unwrap();
+        assert!(worker.capture_export_chats(&selection).is_ok());
+        worker
+            .lid_to_pn
+            .insert("123".into(), PEER.split('@').next().unwrap().into());
+        worker
+            .archive
+            .ensure_chat("123@lid", "Synthetic alias")
+            .unwrap();
+        let mut pending = job(30, PEER);
+        pending.selection = selection.clone();
+        worker.capture_export.job = Some(pending);
+        worker.archive.set_locked("123@lid", true).unwrap();
+        assert!(worker.capture_export_chats(&selection).is_err());
+        worker.recheck_capture_export();
+        let output = tempfile::tempdir().unwrap();
+        worker.capture_export_target(30, Some(output.path().to_owned()));
+        assert_eq!(output.path().read_dir().unwrap().count(), 0);
+        assert!(worker.capture_export.job.is_none());
+        assert!(events.try_iter().any(|event| matches!(
+            event,
+            Event::CaptureExportFinished {
+                request: 30,
+                result: Ok(None)
+            }
+        )));
     }
 
     #[test]

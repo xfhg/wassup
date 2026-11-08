@@ -2712,6 +2712,13 @@ pub fn forward_limit(frequently_forwarded: bool) -> usize {
 }
 
 /// Actions queued by views and applied after drawing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DeletedGrouping {
+    #[default]
+    Chat,
+    Sender,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     FetchBlocklist,
@@ -2724,6 +2731,16 @@ pub enum Action {
     RefreshDeleted,
     /// Loads the next page of retained originals.
     MoreDeleted,
+    SetDeletedGrouping(DeletedGrouping),
+    FocusDeletedMessage(i64),
+    LoadDeletedHistory {
+        chat: ChatId,
+        message: String,
+        after: i64,
+    },
+    ExportDeletedChat {
+        chat: ChatId,
+    },
     /// Focuses the filter for the loaded retained originals.
     FocusDeletedSearch,
     /// Returns from a retained sender's thread to the sender list, then Chats.

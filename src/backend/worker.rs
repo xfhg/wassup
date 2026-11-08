@@ -1080,6 +1080,7 @@ pub async fn run(
         prefetch: prefetch::State::default(),
         chat_export: chat_export::State::default(),
         capture_export: capture_export::State::default(),
+        deleted_context: deleted::State::default(),
         older_serial: 0,
         late_older: VecDeque::new(),
         older_ids_match: false,
@@ -1499,6 +1500,7 @@ struct Worker {
     prefetch: prefetch::State,
     chat_export: chat_export::State,
     capture_export: capture_export::State,
+    deleted_context: deleted::State,
     /// Numbers phone-history requests, so a send result or a late answer is
     /// matched to the request it belongs to rather than to whichever request
     /// the chat has now.
@@ -4727,6 +4729,7 @@ impl Worker {
     }
 
     async fn on_logged_out(&mut self) {
+        self.deleted_context.cancel();
         self.stop_chat_export().await;
         self.stop_capture_export().await;
         self.contact_generation = self.contact_generation.wrapping_add(1);
@@ -7527,6 +7530,21 @@ impl Worker {
                 until,
             } => self.search_chat_messages(chat, query, from, until),
             Command::LoadDeleted { request, before } => self.load_deleted(request, before),
+            Command::LoadDeletedContext { request, anchors } => {
+                self.load_deleted_context(request, anchors)
+            }
+            Command::LoadDeletedHistory {
+                request,
+                chat,
+                message,
+                after,
+            } => self.load_deleted_history(request, chat, message, after),
+            Command::DeletedContextReady {
+                request,
+                generation,
+                rows,
+                failed,
+            } => self.deleted_context_ready(request, generation, rows, failed),
             Command::LoadStarred => self.emit_starred(),
             Command::SetStar {
                 chat,
@@ -20401,6 +20419,7 @@ mod receipt_tests {
             prefetch: prefetch::State::default(),
             chat_export: chat_export::State::default(),
             capture_export: capture_export::State::default(),
+            deleted_context: deleted::State::default(),
             older_serial: 0,
             late_older: VecDeque::new(),
             older_ids_match: false,

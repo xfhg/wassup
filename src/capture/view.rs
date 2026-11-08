@@ -5,10 +5,11 @@
 //! than treating the presence or absence of a revoke event as authoritative.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
-use rusqlite::{OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 use whatsapp_rust::prelude::wa;
 use whatsapp_rust::waproto::buffa::Message as _;
 
@@ -120,107 +121,10 @@ impl Capture {
         let next_before = more.then(|| candidates[limit - 1].0);
         let mut messages = Vec::with_capacity(candidates.len().min(limit));
         for (sequence, chat, message_id) in candidates.into_iter().take(limit) {
-            let (original, raw) = snapshot.query_row(
-                "SELECT sequence,kind,text,sender,sent_at,observed_at,source,direction,month,raw
-                 FROM events WHERE chat=?1 AND message_id=?2
-                   AND kind IN ('message','outgoing_pending')
-                 ORDER BY (kind='outgoing_pending') DESC,sequence ASC LIMIT 1",
-                params![chat, message_id],
-                |row| Ok((read_event(row)?, row.get::<_, Vec<u8>>(9)?)),
-            )?;
-            let visible = wa::Message::decode_from_slice(&raw)
-                .ok()
-                .is_some_and(|message| crate::backend::retained_original_is_visible(&message));
-            if !visible {
-                continue;
+            if let Some(saved) = hydrate(&snapshot, self.root(), &[chat], &message_id)? {
+                debug_assert_eq!(saved.sequence, sequence);
+                messages.push(saved);
             }
-            let (observed_on_whatsapp, send_accepted, deletion_observed) = snapshot.query_row(
-                "SELECT EXISTS(SELECT 1 FROM events
-                   WHERE chat=?1 AND message_id=?2 AND kind='message'),
-                 EXISTS(SELECT 1 FROM events
-                   WHERE chat=?1 AND target_id=?2 AND kind='send_accepted'),
-                 EXISTS(SELECT 1 FROM events
-                   WHERE chat=?1 AND target_id=?2 AND kind IN ('deleted','revoke_accepted'))",
-                params![chat, message_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )?;
-            // Prefer the durable local copy, then a completed echo download.
-            // There is one ordinary attachment descriptor per WhatsApp message.
-            let attachments = snapshot
-                .query_row(
-                    "SELECT m.status,m.path,m.error FROM media_jobs m
-                     JOIN events e ON e.sequence=m.event_sequence
-                     WHERE e.chat=?1 AND e.message_id=?2
-                       AND e.kind IN ('message','outgoing_pending')
-                     ORDER BY (m.status='saved') DESC,
-                              (e.kind='outgoing_pending') DESC,e.sequence ASC LIMIT 1",
-                    params![chat, message_id],
-                    |row| read_attachment(row, self.root()),
-                )
-                .optional()?
-                .into_iter()
-                .collect();
-            let mut history = {
-                let mut statement = snapshot.prepare(
-                    "SELECT sequence,kind,text,sender,sent_at,observed_at,source,direction,month
-                     FROM events WHERE chat=?1 AND target_id=?2
-                     ORDER BY sequence ASC LIMIT ?3",
-                )?;
-                statement
-                    .query_map(
-                        params![chat, message_id, (HISTORY_LIMIT + 1) as i64],
-                        read_event,
-                    )?
-                    .collect::<rusqlite::Result<Vec<_>>>()?
-            };
-            let history_truncated = history.len() > HISTORY_LIMIT;
-            history.truncate(HISTORY_LIMIT);
-            let history = history
-                .into_iter()
-                .map(|event| {
-                    let attachments = snapshot
-                        .query_row(
-                            "SELECT status,path,error FROM media_jobs WHERE event_sequence=?1",
-                            [event.sequence],
-                            |row| read_attachment(row, self.root()),
-                        )
-                        .optional()?
-                        .into_iter()
-                        .collect();
-                    Ok(SavedObservation {
-                        sequence: event.sequence,
-                        kind: event.kind,
-                        text: event.text,
-                        sender: event.sender,
-                        sent_at: event.sent_at,
-                        observed_at: event.observed_at,
-                        source: event.source,
-                        attachments,
-                    })
-                })
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            messages.push(SavedMessage {
-                sequence,
-                chat: chat.clone(),
-                message_id,
-                sender: original.sender,
-                text: original.text,
-                sent_at: original.sent_at,
-                observed_at: original.observed_at,
-                outgoing: original.direction == "outgoing",
-                observed_on_whatsapp,
-                send_accepted,
-                deletion_observed,
-                source: original.source,
-                markdown_path: self.root().join("chats").join(format!(
-                    "{}-{}.md",
-                    hex_digest(chat.as_bytes()),
-                    original.month
-                )),
-                attachments,
-                history,
-                history_truncated,
-            });
         }
         snapshot.commit()?;
         Ok(SavedMessagePage {
@@ -228,6 +132,338 @@ impl Capture {
             next_before,
         })
     }
+}
+
+/// A bounded continuation through one original's immutable observations.
+#[derive(Clone, Debug, Default)]
+pub struct SavedHistoryPage {
+    pub observations: Vec<SavedObservation>,
+    pub has_more: bool,
+}
+
+/// Chronological originals, with a cursor even when a batch contained controls.
+pub(crate) struct ChronologicalPage {
+    pub messages: Vec<SavedMessage>,
+    pub next_after: Option<(i64, i64)>,
+}
+
+/// One keyed snapshot shared by every original, neighbor and revision in a view.
+pub(crate) struct SavedChatReader {
+    connection: Connection,
+    root: PathBuf,
+    aliases: Vec<String>,
+}
+
+impl Capture {
+    pub(crate) fn saved_chat_reader(&self, aliases: &[String]) -> Result<SavedChatReader> {
+        anyhow::ensure!(!aliases.is_empty(), "Missing chat identity");
+        let connection = self.reader()?;
+        connection.busy_timeout(Duration::from_secs(2))?;
+        connection.execute_batch("PRAGMA query_only=ON; BEGIN")?;
+        Ok(SavedChatReader {
+            connection,
+            root: self.root().to_path_buf(),
+            aliases: aliases.to_vec(),
+        })
+    }
+
+    /// Resolve requested anchors in one keyed query before opening chat views.
+    pub(crate) fn saved_original_locations(&self, sequences: &[i64]) -> Result<Vec<(i64, String)>> {
+        let reader = self.reader()?;
+        let sequences = serde_json::to_string(sequences)?;
+        let mut statement=reader.prepare(
+            "SELECT sequence,chat FROM events WHERE sequence IN (SELECT value FROM json_each(?1)) AND kind IN ('message','outgoing_pending') ORDER BY sequence"
+        )?;
+        Ok(statement
+            .query_map([sequences], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn saved_history(
+        &self,
+        aliases: &[String],
+        message: &str,
+        after: i64,
+        limit: usize,
+    ) -> Result<SavedHistoryPage> {
+        self.saved_chat_reader(aliases)?
+            .history(message, after, limit)
+    }
+}
+
+impl SavedChatReader {
+    pub(crate) fn original(&self, message: &str) -> Result<Option<SavedMessage>> {
+        hydrate(&self.connection, &self.root, &self.aliases, message)
+    }
+
+    pub(crate) fn original_at(&self, sequence: i64) -> Result<Option<SavedMessage>> {
+        let aliases = serde_json::to_string(&self.aliases)?;
+        let message: Option<String> = self.connection.query_row(
+            "SELECT message_id FROM events WHERE sequence=?1 AND chat IN (SELECT value FROM json_each(?2)) AND kind IN ('message','outgoing_pending')",
+            params![sequence,aliases], |row| row.get(0),
+        ).optional()?;
+        message
+            .map(|id| self.original(&id))
+            .transpose()
+            .map(Option::flatten)
+    }
+
+    pub(crate) fn history(
+        &self,
+        message: &str,
+        after: i64,
+        limit: usize,
+    ) -> Result<SavedHistoryPage> {
+        read_history(
+            &self.connection,
+            &self.root,
+            &self.aliases,
+            message,
+            after,
+            limit,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn originals(
+        &self,
+        after: Option<(i64, i64)>,
+        limit: usize,
+    ) -> Result<ChronologicalPage> {
+        self.originals_cancellable(after, limit, &AtomicBool::new(false))
+    }
+
+    pub(crate) fn originals_cancellable(
+        &self,
+        after: Option<(i64, i64)>,
+        limit: usize,
+        cancelled: &AtomicBool,
+    ) -> Result<ChronologicalPage> {
+        self.page(after, limit, false, cancelled)
+    }
+
+    fn page(
+        &self,
+        boundary: Option<(i64, i64)>,
+        limit: usize,
+        backwards: bool,
+        cancelled: &AtomicBool,
+    ) -> Result<ChronologicalPage> {
+        check_cancelled(cancelled)?;
+        let limit = limit.clamp(1, PAGE_LIMIT);
+        let aliases = serde_json::to_string(&self.aliases)?;
+        let comparison = if backwards { "<" } else { ">" };
+        let order = if backwards { "DESC" } else { "ASC" };
+        let sql = format!(
+            "SELECT e.sent_at,e.sequence,e.message_id FROM events e
+             WHERE e.chat IN (SELECT value FROM json_each(?1))
+               AND e.kind IN ('message','outgoing_pending')
+               AND NOT EXISTS (SELECT 1 FROM events prior
+                   WHERE prior.chat IN (SELECT value FROM json_each(?1))
+                     AND prior.message_id=e.message_id
+                     AND prior.kind IN ('message','outgoing_pending') AND prior.sequence<e.sequence)
+               AND (?2 IS NULL OR (e.sent_at,e.sequence) {comparison} (?2,?3))
+             ORDER BY e.sent_at {order},e.sequence {order} LIMIT ?4"
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = statement
+            .query_map(
+                params![
+                    aliases,
+                    boundary.map(|p| p.0),
+                    boundary.map(|p| p.1),
+                    (limit + 1) as i64
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let next_after = (rows.len() > limit).then(|| (rows[limit - 1].0, rows[limit - 1].1));
+        let mut messages = Vec::new();
+        for (_, _, id) in rows.into_iter().take(limit) {
+            check_cancelled(cancelled)?;
+            if let Some(saved) = self.original(&id)?
+                && accepted_original(&saved)
+            {
+                messages.push(saved);
+            }
+        }
+        Ok(ChronologicalPage {
+            messages,
+            next_after,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn neighbors(
+        &self,
+        original: &SavedMessage,
+    ) -> Result<(Option<SavedMessage>, Option<SavedMessage>)> {
+        self.neighbors_cancellable(original, &AtomicBool::new(false))
+    }
+
+    pub(crate) fn neighbors_cancellable(
+        &self,
+        original: &SavedMessage,
+        cancelled: &AtomicBool,
+    ) -> Result<(Option<SavedMessage>, Option<SavedMessage>)> {
+        Ok((
+            self.neighbor(original, true, cancelled)?,
+            self.neighbor(original, false, cancelled)?,
+        ))
+    }
+
+    fn neighbor(
+        &self,
+        original: &SavedMessage,
+        backwards: bool,
+        cancelled: &AtomicBool,
+    ) -> Result<Option<SavedMessage>> {
+        let mut cursor = Some((original.sent_at, original.sequence));
+        loop {
+            check_cancelled(cancelled)?;
+            let page = self.page(cursor, 1, backwards, cancelled)?;
+            if let Some(message) = page.messages.into_iter().next() {
+                return Ok(Some(message));
+            }
+            let Some(next) = page.next_after else {
+                return Ok(None);
+            };
+            cursor = Some(next);
+        }
+    }
+}
+
+fn check_cancelled(cancelled: &AtomicBool) -> Result<()> {
+    anyhow::ensure!(
+        !cancelled.load(Ordering::Acquire),
+        "Saved message read cancelled"
+    );
+    Ok(())
+}
+
+pub(crate) fn accepted_original(saved: &SavedMessage) -> bool {
+    saved.source != "local_send" || saved.send_accepted || saved.observed_on_whatsapp
+}
+
+fn hydrate(
+    connection: &Connection,
+    root: &Path,
+    aliases: &[String],
+    message: &str,
+) -> Result<Option<SavedMessage>> {
+    let json = serde_json::to_string(aliases)?;
+    let first: Option<(i64,i64)> = connection.query_row(
+        "SELECT sequence,sent_at FROM events WHERE chat IN (SELECT value FROM json_each(?1)) AND message_id=?2 AND kind IN ('message','outgoing_pending') ORDER BY sequence LIMIT 1",
+        params![json,message], |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional()?;
+    let Some((sequence, sent_at)) = first else {
+        return Ok(None);
+    };
+    let (original,raw,chat)=connection.query_row(
+        "SELECT sequence,kind,text,sender,sent_at,observed_at,source,direction,month,raw,chat FROM events
+         WHERE chat IN (SELECT value FROM json_each(?1)) AND message_id=?2 AND kind IN ('message','outgoing_pending')
+         ORDER BY (kind='outgoing_pending') DESC,sequence ASC LIMIT 1",
+        params![json,message], |row| Ok((read_event(row)?,row.get::<_,Vec<u8>>(9)?,row.get::<_,String>(10)?)),
+    )?;
+    let visible = wa::Message::decode_from_slice(&raw)
+        .ok()
+        .is_some_and(|message| crate::backend::retained_original_is_visible(&message));
+    if !visible {
+        return Ok(None);
+    }
+    let (observed_on_whatsapp,send_accepted,deletion_observed)=connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM events WHERE chat IN (SELECT value FROM json_each(?1)) AND message_id=?2 AND kind='message'),
+         EXISTS(SELECT 1 FROM events WHERE chat IN (SELECT value FROM json_each(?1)) AND target_id=?2 AND kind='send_accepted'),
+         EXISTS(SELECT 1 FROM events WHERE chat IN (SELECT value FROM json_each(?1)) AND target_id=?2 AND kind IN ('deleted','revoke_accepted'))",
+        params![json,message], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    )?;
+    let attachments=connection.query_row(
+        "SELECT m.status,m.path,m.error FROM media_jobs m JOIN events e ON e.sequence=m.event_sequence
+         WHERE e.chat IN (SELECT value FROM json_each(?1)) AND e.message_id=?2 AND e.kind IN ('message','outgoing_pending')
+         ORDER BY (m.status='saved') DESC,(e.kind='outgoing_pending') DESC,e.sequence ASC LIMIT 1",
+        params![json,message], |row| read_attachment(row,root),
+    ).optional()?.into_iter().collect();
+    let history = read_history(connection, root, aliases, message, 0, HISTORY_LIMIT)?;
+    Ok(Some(SavedMessage {
+        sequence,
+        chat: chat.clone(),
+        message_id: message.to_owned(),
+        sender: original.sender,
+        text: original.text,
+        sent_at,
+        observed_at: original.observed_at,
+        outgoing: original.direction == "outgoing",
+        observed_on_whatsapp,
+        send_accepted,
+        deletion_observed,
+        source: original.source,
+        markdown_path: root.join("chats").join(format!(
+            "{}-{}.md",
+            hex_digest(chat.as_bytes()),
+            original.month
+        )),
+        attachments,
+        history: history.observations,
+        history_truncated: history.has_more,
+    }))
+}
+
+fn read_history(
+    connection: &Connection,
+    root: &Path,
+    aliases: &[String],
+    message: &str,
+    after: i64,
+    limit: usize,
+) -> Result<SavedHistoryPage> {
+    let limit = limit.clamp(1, HISTORY_LIMIT);
+    let aliases = serde_json::to_string(aliases)?;
+    let mut statement=connection.prepare(
+        "SELECT sequence,kind,text,sender,sent_at,observed_at,source,direction,month FROM events
+         WHERE chat IN (SELECT value FROM json_each(?1)) AND target_id=?2 AND sequence>?3 ORDER BY sequence ASC LIMIT ?4"
+    )?;
+    let mut events = statement
+        .query_map(
+            params![aliases, message, after, (limit + 1) as i64],
+            read_event,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let has_more = events.len() > limit;
+    events.truncate(limit);
+    let observations = events
+        .into_iter()
+        .map(|event| {
+            let attachments = connection
+                .query_row(
+                    "SELECT status,path,error FROM media_jobs WHERE event_sequence=?1",
+                    [event.sequence],
+                    |row| read_attachment(row, root),
+                )
+                .optional()?
+                .into_iter()
+                .collect();
+            Ok(SavedObservation {
+                sequence: event.sequence,
+                kind: event.kind,
+                text: event.text,
+                sender: event.sender,
+                sent_at: event.sent_at,
+                observed_at: event.observed_at,
+                source: event.source,
+                attachments,
+            })
+        })
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(SavedHistoryPage {
+        observations,
+        has_more,
+    })
 }
 
 struct EventRow {
@@ -294,6 +530,158 @@ mod tests {
             direction: "incoming".to_owned(),
             source: "fixture".to_owned(),
         }
+    }
+
+    #[test]
+    fn chronological_neighbors_merge_aliases_and_skip_controls_and_unsent_attempts() {
+        let directory = tempfile::tempdir().unwrap();
+        let capture = Capture::open(directory.path(), "one").unwrap();
+        let lid = "123@lid";
+        let mut entries = Vec::new();
+        for (id, timestamp, chat) in [
+            ("after", 30, CHAT),
+            ("anchor", 20, CHAT),
+            ("before", 10, lid),
+        ] {
+            let mut original = event(id, "message", id, None);
+            original.timestamp = timestamp;
+            original.chat = chat.into();
+            entries.push((original, None));
+        }
+        let mut alias_echo = event("anchor", "message", "Alias echo", None);
+        alias_echo.chat = lid.into();
+        alias_echo.timestamp = 21;
+        entries.push((alias_echo, None));
+        let mut control = event("control", "message", "control", None);
+        control.timestamp = 19;
+        control.raw = wa::Message::default().encode_to_vec();
+        entries.push((control, None));
+        let mut unsent = event("unsent", "outgoing_pending", "Not sent", None);
+        unsent.timestamp = 22;
+        unsent.source = "local_send".into();
+        unsent.direction = "outgoing".into();
+        entries.push((unsent, None));
+        capture.record_entries(&entries).unwrap();
+        let aliases = vec![CHAT.to_owned(), lid.to_owned()];
+        let reader = capture.saved_chat_reader(&aliases).unwrap();
+        let anchor = reader.original("anchor").unwrap().unwrap();
+        assert_eq!((anchor.sequence, anchor.sent_at), (2, 20));
+        let (before, after) = reader.neighbors(&anchor).unwrap();
+        assert_eq!(before.unwrap().message_id, "before");
+        assert_eq!(after.unwrap().message_id, "after");
+        let page = reader.originals(None, 100).unwrap();
+        assert_eq!(
+            page.messages
+                .iter()
+                .map(|m| m.message_id.as_str())
+                .collect::<Vec<_>>(),
+            ["before", "anchor", "after"]
+        );
+        assert!(page.next_after.is_none());
+    }
+
+    #[test]
+    fn context_snapshot_is_stable_and_a_new_snapshot_sees_late_context() {
+        let directory = tempfile::tempdir().unwrap();
+        let capture = Capture::open(directory.path(), "one").unwrap();
+        let mut anchor = event("anchor", "message", "Original", None);
+        anchor.timestamp = 20;
+        capture.record_event(anchor).unwrap();
+        let aliases = vec![CHAT.to_owned()];
+        let reader = capture.saved_chat_reader(&aliases).unwrap();
+        let original = reader.original("anchor").unwrap().unwrap();
+        assert!(reader.neighbors(&original).unwrap().1.is_none());
+        let mut late = event("later", "message", "Late arrival", None);
+        late.timestamp = 21;
+        capture.record_event(late).unwrap();
+        assert!(
+            reader.neighbors(&original).unwrap().1.is_none(),
+            "one view/export has one snapshot"
+        );
+        assert_eq!(
+            capture
+                .saved_chat_reader(&aliases)
+                .unwrap()
+                .neighbors(&original)
+                .unwrap()
+                .1
+                .unwrap()
+                .message_id,
+            "later"
+        );
+    }
+
+    #[test]
+    fn history_pages_keep_equal_text_and_alias_observations_in_sequence_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let capture = Capture::open(directory.path(), "one").unwrap();
+        let lid = "123@lid";
+        capture
+            .record_event(event("original", "message", "Original", None))
+            .unwrap();
+        let entries = (0..300)
+            .map(|n| {
+                let mut edit = event(&format!("edit-{n}"), "edited", "Repeated", Some("original"));
+                if n % 2 == 1 {
+                    edit.chat = lid.into();
+                }
+                (edit, None)
+            })
+            .collect::<Vec<_>>();
+        capture.record_entries(&entries).unwrap();
+        let aliases = vec![CHAT.to_owned(), lid.to_owned()];
+        let reader = capture.saved_chat_reader(&aliases).unwrap();
+        let saved = reader.original("original").unwrap().unwrap();
+        assert_eq!(saved.history.len(), 256);
+        assert!(saved.history_truncated);
+        let page = capture
+            .saved_history(
+                &aliases,
+                "original",
+                saved.history.last().unwrap().sequence,
+                256,
+            )
+            .unwrap();
+        assert_eq!(page.observations.len(), 44);
+        assert!(!page.has_more);
+        assert!(page.observations.iter().all(|e| e.text == "Repeated"));
+        assert_eq!(page.observations.last().unwrap().sequence, 301);
+    }
+
+    #[test]
+    fn cancelled_context_reads_stop_before_scanning_or_hydrating() {
+        let directory = tempfile::tempdir().unwrap();
+        let capture = Capture::open(directory.path(), "one").unwrap();
+        capture
+            .record_event(event("anchor", "message", "Original", None))
+            .unwrap();
+        let reader = capture.saved_chat_reader(&[CHAT.to_owned()]).unwrap();
+        let original = reader.original("anchor").unwrap().unwrap();
+        let cancelled = AtomicBool::new(true);
+        assert!(reader.neighbors_cancellable(&original, &cancelled).is_err());
+        assert!(reader.originals_cancellable(None, 100, &cancelled).is_err());
+        assert_eq!(
+            capture
+                .saved_original_locations(&[original.sequence, original.sequence, 999])
+                .unwrap(),
+            [(original.sequence, CHAT.to_owned())]
+        );
+    }
+
+    #[test]
+    fn equal_timestamp_originals_have_stable_first_capture_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let capture = Capture::open(directory.path(), "one").unwrap();
+        for id in ["first", "second", "third"] {
+            capture
+                .record_event(event(id, "message", id, None))
+                .unwrap();
+        }
+        let reader = capture.saved_chat_reader(&[CHAT.to_owned()]).unwrap();
+        let original = reader.original("second").unwrap().unwrap();
+        let (before, after) = reader.neighbors(&original).unwrap();
+        assert_eq!(before.unwrap().message_id, "first");
+        assert_eq!(after.unwrap().message_id, "third");
     }
 
     #[test]

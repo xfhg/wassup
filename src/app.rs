@@ -3657,7 +3657,9 @@ impl App {
 
     fn apply_backend_event(&mut self, event: Event, live: bool) {
         match event {
-            Event::CaptureStatus(status) => self.capture_status = Some(status),
+            Event::CaptureStatus(status) => {
+                self.capture_status = Some(status);
+            }
             Event::CaptureExportFinished { request, result } => {
                 if self.capture_export != Some(request) {
                     return;
@@ -3674,9 +3676,12 @@ impl App {
                 }
             }
             Event::DeletedUnavailable => {
+                self.clear_deleted_context();
                 self.deleted_messages.clear();
                 self.deleted_query.clear();
                 self.deleted_selected_sender = None;
+                self.deleted_selected_chat = None;
+                self.deleted_focused_message = None;
                 self.deleted_show_thread = false;
                 self.deleted_request = self.deleted_request.wrapping_add(1);
                 self.deleted_loading = false;
@@ -3705,6 +3710,7 @@ impl App {
                 self.deleted_error = error;
                 if self.deleted_error.is_some() {
                     self.deleted_messages.clear();
+                    self.clear_deleted_context();
                 } else if self.deleted_preserve && next_before.is_some() {
                     // Keep already loaded older originals when the first page
                     // moves. Reading one sender must not erase its selection.
@@ -3745,6 +3751,30 @@ impl App {
                         before: next_before,
                     });
                 }
+            }
+            Event::DeletedContextLoaded {
+                request,
+                rows,
+                error,
+            } => {
+                self.apply_deleted_context(request, rows, error);
+            }
+            Event::DeletedHistoryLoaded {
+                request,
+                chat,
+                message,
+                after,
+                observations,
+                has_more,
+                error,
+            } => {
+                self.apply_deleted_history(
+                    request,
+                    (chat, message, after),
+                    observations,
+                    has_more,
+                    error,
+                );
             }
             Event::StorageStats {
                 stats,
@@ -3790,6 +3820,7 @@ impl App {
                 chats,
                 state,
             } => {
+                self.remap_deleted_identity(&from, &to);
                 if !self.events_hidden
                     && let Some(Dialog::ConfirmBlock { chat, .. }) = &mut self.dialog
                     && chat == &from
@@ -5210,8 +5241,11 @@ impl App {
                 self.avatars.clear();
                 self.starred.clear();
                 self.deleted_messages.clear();
+                self.clear_deleted_context();
                 self.deleted_query.clear();
                 self.deleted_selected_sender = None;
+                self.deleted_selected_chat = None;
+                self.deleted_focused_message = None;
                 self.deleted_show_thread = false;
                 self.deleted_request = self.deleted_request.wrapping_add(1);
                 self.deleted_loading = false;
@@ -7025,6 +7059,10 @@ impl App {
     fn tick(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
         self.tick_call(ctx);
+        if self.page == Page::Deleted && !self.backend.is_offline() && !self.app_lock.is_locked() {
+            self.refresh_deleted_context();
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
         if self.page == Page::Deleted
             && !self.backend.is_offline()
             && !self.deleted_paged
@@ -7161,6 +7199,7 @@ impl App {
         }
         let chats = match &selection {
             crate::backend::CaptureExportSelection::Chats(chats) => chats.as_slice(),
+            crate::backend::CaptureExportSelection::DeletedChat(chat) => std::slice::from_ref(chat),
             crate::backend::CaptureExportSelection::Attachment { chat, .. } => {
                 std::slice::from_ref(chat)
             }
@@ -7582,6 +7621,15 @@ impl App {
             }
             Action::RefreshDeleted => self.request_deleted(false),
             Action::MoreDeleted => self.request_deleted(true),
+            Action::SetDeletedGrouping(grouping) => self.set_deleted_grouping(grouping),
+            Action::FocusDeletedMessage(sequence) => self.deleted_focused_message = Some(sequence),
+            Action::LoadDeletedHistory {
+                chat,
+                message,
+                after,
+            } => {
+                self.request_deleted_history(chat, message, after);
+            }
             Action::BackDeleted => {
                 if self.deleted_show_thread {
                     self.deleted_show_thread = false;
@@ -8155,6 +8203,11 @@ impl App {
                         .collect(),
                 };
                 self.begin_capture_export(crate::backend::CaptureExportSelection::Chats(chats));
+            }
+            Action::ExportDeletedChat { chat } => {
+                self.begin_capture_export(crate::backend::CaptureExportSelection::DeletedChat(
+                    chat,
+                ));
             }
             Action::ExportSavedAttachment { chat, path } => {
                 self.begin_capture_export(crate::backend::CaptureExportSelection::Attachment {
@@ -10549,6 +10602,9 @@ impl App {
     /// Read-only archive navigation. Requests are scoped to this account and
     /// invalidated on unlink; older replies cannot replace a newer page.
     fn request_deleted(&mut self, more: bool) {
+        if !more {
+            self.deleted_context_due = None;
+        }
         self.request_deleted_mode(more, !more);
     }
 
@@ -12572,6 +12628,7 @@ fn notification_eligible(chat: &Chat, now: i64, message_at: i64) -> bool {
 }
 
 mod calls;
+mod deleted;
 pub use calls::CallPerson;
 
 /// The character ranges of `text` to wrap in `format`'s markers for a
@@ -13193,6 +13250,312 @@ mod tests {
         );
         assert!(app.deleted_messages.is_empty());
         assert!(!app.deleted_loading);
+    }
+
+    fn retained_fixture(sequence: i64) -> crate::backend::RetainedMessage {
+        crate::backend::RetainedMessage {
+            message: deleted_fixture(sequence),
+            anchor: true,
+            gap_before: false,
+            missing_before: false,
+            missing_after: false,
+        }
+    }
+
+    fn retained_observation(sequence: i64) -> crate::capture::view::SavedObservation {
+        crate::capture::view::SavedObservation {
+            sequence,
+            kind: "edited".into(),
+            text: format!("Synthetic revision {sequence}"),
+            sender: "fixture@s.whatsapp.net".into(),
+            sent_at: sequence,
+            observed_at: sequence,
+            source: "fixture".into(),
+            attachments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn retained_context_refreshes_during_search_and_older_page_browsing() {
+        let mut app = app();
+        app.chats
+            .push(Chat::new("fixture@s.whatsapp.net".into(), "Fixture".into()));
+        app.deleted_messages.push(deleted_fixture(3));
+        app.deleted_selected_chat = Some("fixture@s.whatsapp.net".into());
+        app.deleted_query = "Permanent".into();
+        app.deleted_paged = true;
+        app.refresh_deleted_context();
+        assert_eq!(app.deleted_context_anchors, [3]);
+        assert!(app.deleted_context_loading);
+        let request = app.deleted_context_request;
+        app.apply_backend_event(
+            Event::DeletedContextLoaded {
+                request,
+                rows: vec![retained_fixture(3)],
+                error: None,
+            },
+            true,
+        );
+        assert_eq!(app.deleted_context.len(), 1);
+        app.deleted_context_due = None;
+        app.refresh_deleted_context();
+        assert!(app.deleted_context_loading);
+        assert_ne!(app.deleted_context_request, request);
+        assert_eq!(
+            app.deleted_context.len(),
+            1,
+            "same selection stays visible while refreshing"
+        );
+    }
+
+    #[test]
+    fn changing_retained_selection_discards_context_and_rejects_old_responses() {
+        let mut app = app();
+        app.chats
+            .push(Chat::new("fixture@s.whatsapp.net".into(), "Fixture".into()));
+        app.deleted_messages.push(deleted_fixture(3));
+        app.deleted_selected_chat = Some("fixture@s.whatsapp.net".into());
+        app.refresh_deleted_context();
+        let old = app.deleted_context_request;
+        app.deleted_context.push(retained_fixture(3));
+        let second_chat = "second@s.whatsapp.net".to_owned();
+        app.chats
+            .push(Chat::new(second_chat.clone(), "Second".into()));
+        let mut second = deleted_fixture(4);
+        second.canonical_chat = second_chat.clone();
+        app.deleted_messages.push(second);
+        app.deleted_selected_chat = Some(second_chat);
+        app.refresh_deleted_context();
+        assert!(app.deleted_context.is_empty());
+        assert_eq!(app.deleted_context_anchors, [4]);
+        app.apply_backend_event(
+            Event::DeletedContextLoaded {
+                request: old,
+                rows: vec![retained_fixture(3)],
+                error: None,
+            },
+            true,
+        );
+        assert!(app.deleted_context.is_empty());
+        assert!(app.deleted_context_loading);
+    }
+
+    #[test]
+    fn new_retained_anchor_preserves_open_revision_pages_and_rejects_old_responses() {
+        let mut app = app();
+        app.chats
+            .push(Chat::new("fixture@s.whatsapp.net".into(), "Fixture".into()));
+        app.deleted_messages.push(deleted_fixture(3));
+        app.deleted_selected_chat = Some("fixture@s.whatsapp.net".into());
+        app.refresh_deleted_context();
+        let old_request = app.deleted_context_request;
+        let mut previous = retained_fixture(3);
+        previous.message.saved.history = (10..310).map(retained_observation).collect();
+        app.deleted_context.push(previous);
+        app.deleted_messages.push(deleted_fixture(4));
+        app.refresh_deleted_context();
+        assert_eq!(app.deleted_context_anchors, [3, 4]);
+        assert_eq!(app.deleted_context[0].message.saved.history.len(), 300);
+        app.apply_backend_event(
+            Event::DeletedContextLoaded {
+                request: old_request,
+                rows: Vec::new(),
+                error: None,
+            },
+            true,
+        );
+        assert!(app.deleted_context_loading);
+        assert_eq!(app.deleted_context[0].message.saved.history.len(), 300);
+        let mut fresh = retained_fixture(3);
+        fresh.message.saved.history = (10..266).map(retained_observation).collect();
+        fresh.message.saved.history_truncated = true;
+        app.apply_backend_event(
+            Event::DeletedContextLoaded {
+                request: app.deleted_context_request,
+                rows: vec![fresh, retained_fixture(4)],
+                error: None,
+            },
+            true,
+        );
+        assert_eq!(app.deleted_context.len(), 2);
+        assert_eq!(app.deleted_context[0].message.saved.history.len(), 300);
+        assert!(!app.deleted_context_loading);
+    }
+
+    #[test]
+    fn retained_refresh_preserves_loaded_revisions_and_new_history_appends_once() {
+        let mut app = app();
+        let chat = "fixture@s.whatsapp.net".to_owned();
+        app.chats.push(Chat::new(chat.clone(), "Fixture".into()));
+        let mut old = retained_fixture(3);
+        old.message.saved.history = (10..15).map(retained_observation).collect();
+        old.message.saved.history[2]
+            .attachments
+            .push(crate::capture::view::SavedAttachment {
+                status: "downloading".into(),
+                path: None,
+                error: None,
+            });
+        app.deleted_context.push(old);
+        let mut fresh = retained_fixture(3);
+        fresh.message.saved.history = (10..12).map(retained_observation).collect();
+        fresh.message.saved.history_truncated = true;
+        let request = app.deleted_context_request;
+        app.apply_backend_event(
+            Event::DeletedContextLoaded {
+                request,
+                rows: vec![fresh],
+                error: None,
+            },
+            true,
+        );
+        assert_eq!(app.deleted_context[0].message.saved.history.len(), 5);
+        let message = "saved-3".to_owned();
+        assert!(
+            app.deleted_history_loading
+                .contains(&(chat.clone(), message.clone(), 11)),
+            "cached revisions refresh automatically"
+        );
+        let mut observations = (12..16).map(retained_observation).collect::<Vec<_>>();
+        observations[0]
+            .attachments
+            .push(crate::capture::view::SavedAttachment {
+                status: "saved".into(),
+                path: None,
+                error: None,
+            });
+        app.apply_backend_event(
+            Event::DeletedHistoryLoaded {
+                request,
+                chat,
+                message,
+                after: 11,
+                observations,
+                has_more: false,
+                error: None,
+            },
+            true,
+        );
+        assert_eq!(app.deleted_context[0].message.saved.history.len(), 6);
+        assert!(!app.deleted_context[0].message.saved.history_truncated);
+        assert_eq!(
+            app.deleted_context[0].message.saved.history[2].attachments[0].status,
+            "saved"
+        );
+        assert!(app.deleted_history_loading.is_empty());
+    }
+
+    #[test]
+    fn privacy_invalidation_rejects_retained_context_and_history_in_flight() {
+        let mut app = app();
+        app.deleted_context.push(retained_fixture(3));
+        let request = app.deleted_context_request;
+        let chat = "fixture@s.whatsapp.net".to_owned();
+        let message = "saved-3".to_owned();
+        app.deleted_history_loading
+            .insert((chat.clone(), message.clone(), 0));
+        app.apply_backend_event(Event::DeletedUnavailable, true);
+        app.apply_backend_event(
+            Event::DeletedContextLoaded {
+                request,
+                rows: vec![retained_fixture(3)],
+                error: None,
+            },
+            true,
+        );
+        app.apply_backend_event(
+            Event::DeletedHistoryLoaded {
+                request,
+                chat,
+                message,
+                after: 0,
+                observations: vec![retained_observation(10)],
+                has_more: false,
+                error: None,
+            },
+            true,
+        );
+        assert!(app.deleted_context.is_empty());
+        assert!(app.deleted_history_loading.is_empty());
+        assert!(!app.deleted_context_loading);
+    }
+
+    #[test]
+    fn retained_identity_mapping_keeps_selection_and_deduplicates_alias_anchors() {
+        let mut app = app();
+        let mut first = deleted_fixture(1);
+        first.canonical_chat = "123@lid".into();
+        first.sender_id = "123@lid".into();
+        let mut echo = first.clone();
+        echo.saved.sequence = 2;
+        echo.canonical_chat = "fixture@s.whatsapp.net".into();
+        app.deleted_messages = vec![echo, first];
+        app.deleted_selected_chat = Some("123@lid".into());
+        app.deleted_selected_sender = Some("123@lid".into());
+        app.deleted_focused_message = Some(2);
+        app.deleted_paged = true;
+        app.deleted_query = "Permanent".into();
+        app.deleted_context.push(retained_fixture(1));
+        let old_request = app.deleted_context_request;
+        app.remap_deleted_identity("123@lid", "fixture@s.whatsapp.net");
+        assert_eq!(app.deleted_messages.len(), 1);
+        assert_eq!(app.deleted_messages[0].saved.sequence, 1);
+        assert_eq!(app.deleted_focused_message, Some(1));
+        assert_eq!(
+            app.deleted_selected_chat.as_deref(),
+            Some("fixture@s.whatsapp.net")
+        );
+        assert_eq!(
+            app.deleted_selected_sender.as_deref(),
+            Some("fixture@s.whatsapp.net")
+        );
+        assert!(app.deleted_context.is_empty());
+        assert_ne!(old_request, app.deleted_context_request);
+    }
+
+    #[test]
+    fn retained_context_revalidates_anchors_while_global_paging_is_paused() {
+        let mut app = app();
+        app.deleted_messages = vec![deleted_fixture(3), deleted_fixture(2)];
+        app.deleted_context_anchors = vec![2];
+        app.deleted_paged = true;
+        app.deleted_query = "Permanent".into();
+        let request = app.deleted_context_request;
+        app.apply_backend_event(
+            Event::DeletedContextLoaded {
+                request,
+                rows: Vec::new(),
+                error: None,
+            },
+            true,
+        );
+        assert_eq!(app.deleted_messages.len(), 1);
+        assert_eq!(app.deleted_messages[0].saved.sequence, 3);
+        assert!(app.deleted_context_anchors.is_empty());
+    }
+
+    #[test]
+    fn retained_context_refresh_throttle_survives_continuous_capture_updates() {
+        let mut app = app();
+        let due = Instant::now() + Duration::from_secs(5);
+        app.deleted_context_due = Some(due);
+        for timestamp in 1..10 {
+            app.apply_backend_event(
+                Event::CaptureStatus(crate::capture::CaptureStatus {
+                    last_saved_at: Some(timestamp),
+                    ..Default::default()
+                }),
+                true,
+            );
+            assert_eq!(app.deleted_context_due, Some(due));
+        }
+        app.apply_backend_event(Event::Chats(Vec::new()), true);
+        assert_eq!(app.deleted_context_due, Some(due));
+        app.request_deleted(false);
+        assert!(
+            app.deleted_context_due.is_none(),
+            "explicit refresh bypasses the timer"
+        );
     }
 
     #[test]

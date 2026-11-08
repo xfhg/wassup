@@ -138,6 +138,7 @@ fn identity_for(parent: &Path) -> Result<String> {
     ))
 }
 
+#[cfg(not(test))]
 fn platform_store() -> Result<std::sync::Arc<dyn CredentialStoreApi>> {
     #[cfg(target_os = "linux")]
     let store = zbus_secret_service_keyring_store::Store::new();
@@ -149,6 +150,18 @@ fn platform_store() -> Result<std::sync::Arc<dyn CredentialStoreApi>> {
         .map_err(keyring_error)
         .context("Unlock your OS keyring and restart Wassup")?
         as std::sync::Arc<dyn CredentialStoreApi>)
+}
+
+#[cfg(test)]
+fn platform_store() -> Result<std::sync::Arc<dyn CredentialStoreApi>> {
+    // The real open/export-reader paths must never access a user's credentials
+    // in tests. Keep mock entries across background threads and reader opens;
+    // the canonical archive directory still isolates each fixture's identity.
+    static STORE: std::sync::OnceLock<std::sync::Arc<keyring_core::mock::Store>> =
+        std::sync::OnceLock::new();
+    Ok(STORE
+        .get_or_init(|| keyring_core::mock::Store::new().expect("mock credential store"))
+        .clone())
 }
 
 fn key_from_entry(path: &Path, entry: &keyring_core::Entry) -> Result<Zeroizing<[u8; 32]>> {

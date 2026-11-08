@@ -1,14 +1,15 @@
-//! Retained originals, organized by sender beside a read-only conversation.
+//! Retained deletions and their surrounding context, grouped by chat or sender.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use egui::{Align, Align2, Frame, Layout, Margin, Rect, RichText, Sense, vec2};
 
 use crate::app::App;
-use crate::backend::DeletedMessage;
+use crate::backend::{DeletedMessage, RetainedMessage};
 use crate::capture::view::{SavedAttachment, SavedObservation};
 use crate::i18n::Locale;
-use crate::model::{Action, Page};
+use crate::model::{Action, DeletedGrouping, Page};
 use crate::theme::{self, Icon, Palette};
 
 use super::widgets;
@@ -25,7 +26,49 @@ pub fn sender_row_id(account: &str, sender: &str) -> egui::Id {
     egui::Id::new(("deleted-sender", account, sender))
 }
 
-struct SenderGroup {
+pub fn chat_row_id(account: &str, chat: &str) -> egui::Id {
+    egui::Id::new(("deleted-chat", account, chat))
+}
+
+fn selected_key(app: &App) -> Option<&String> {
+    match app.deleted_grouping {
+        DeletedGrouping::Chat => app.deleted_selected_chat.as_ref(),
+        DeletedGrouping::Sender => app.deleted_selected_sender.as_ref(),
+    }
+}
+
+/// Effective grouping and selection, including the visible-list fallback.
+pub(crate) fn selected_context_scope(app: &App) -> Option<(DeletedGrouping, String)> {
+    let groups = message_groups(app);
+    let mut selected = selected_key(app).cloned();
+    keep_visible_selection(&groups, &mut selected);
+    selected.map(|key| (app.deleted_grouping, key))
+}
+
+/// The worker expands only deletion anchors, never recursively expands context.
+pub(crate) fn selected_anchor_sequences(app: &App) -> Vec<i64> {
+    let groups = message_groups(app);
+    let mut selected = selected_key(app).cloned();
+    keep_visible_selection(&groups, &mut selected);
+    groups
+        .iter()
+        .find(|group| Some(&group.key) == selected.as_ref())
+        .map(|group| anchor_sequences(app, group))
+        .unwrap_or_default()
+}
+
+fn anchor_sequences(app: &App, group: &DeletedGroup) -> Vec<i64> {
+    let mut sequences = group
+        .rows
+        .iter()
+        .map(|&index| app.deleted_messages[index].saved.sequence)
+        .collect::<Vec<_>>();
+    sequences.sort_unstable();
+    sequences.dedup();
+    sequences
+}
+
+struct DeletedGroup {
     key: String,
     name: String,
     rows: Vec<usize>,
@@ -37,8 +80,8 @@ struct SenderGroup {
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let narrow = ui.ctx().content_rect().width() < NARROW_WIDTH;
     let palette = app.palette;
-    let mut groups = sender_groups(app);
-    let mut selected = app.deleted_selected_sender.clone();
+    let mut groups = message_groups(app);
+    let mut selected = selected_key(app).cloned();
     keep_visible_selection(&groups, &mut selected);
     let mut show_thread = narrow && app.deleted_show_thread && selected.is_some();
     let mut actions = Vec::new();
@@ -84,15 +127,18 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 );
             });
     }
-    app.deleted_selected_sender = selected;
+    match app.deleted_grouping {
+        DeletedGrouping::Chat => app.deleted_selected_chat = selected,
+        DeletedGrouping::Sender => app.deleted_selected_sender = selected,
+    }
     app.deleted_show_thread = show_thread;
     app.actions.extend(actions);
 }
 
 /// Privacy filtering precedes grouping, counts, previews, and search.
-fn sender_groups(app: &App) -> Vec<SenderGroup> {
+fn message_groups(app: &App) -> Vec<DeletedGroup> {
     let query = app.deleted_query.trim().to_lowercase();
-    let mut groups: Vec<SenderGroup> = Vec::new();
+    let mut groups: Vec<DeletedGroup> = Vec::new();
     let mut positions = HashMap::<String, usize>::new();
     for (index, row) in app.deleted_messages.iter().enumerate() {
         if !app
@@ -102,25 +148,32 @@ fn sender_groups(app: &App) -> Vec<SenderGroup> {
         {
             continue;
         }
-        let key = sender_key(
-            &row.sender_id,
-            row.saved.outgoing,
-            &row.canonical_chat,
-            &row.saved.message_id,
-        );
+        let key = match app.deleted_grouping {
+            DeletedGrouping::Chat => row.canonical_chat.clone(),
+            DeletedGrouping::Sender => sender_key(
+                &row.sender_id,
+                row.saved.outgoing,
+                &row.canonical_chat,
+                &row.saved.message_id,
+            ),
+        };
+        let name = match app.deleted_grouping {
+            DeletedGrouping::Chat => row.chat_name.as_str(),
+            DeletedGrouping::Sender => sender_name(row),
+        };
         if let Some(position) = positions.get(&key).copied() {
             let group = &mut groups[position];
             group.rows.push(index);
             if row.saved.sequence > group.latest_sequence {
                 group.latest = index;
                 group.latest_sequence = row.saved.sequence;
-                group.name = sender_name(row).to_owned();
+                group.name = name.to_owned();
             }
         } else {
             positions.insert(key.clone(), groups.len());
-            groups.push(SenderGroup {
+            groups.push(DeletedGroup {
                 key,
-                name: sender_name(row).to_owned(),
+                name: name.to_owned(),
                 rows: vec![index],
                 latest: index,
                 latest_sequence: row.saved.sequence,
@@ -141,7 +194,7 @@ fn sender_groups(app: &App) -> Vec<SenderGroup> {
     groups
 }
 
-fn sender_key(sender: &str, outgoing: bool, chat: &str, message: &str) -> String {
+pub(crate) fn sender_key(sender: &str, outgoing: bool, chat: &str, message: &str) -> String {
     if outgoing {
         "wassup:own-messages".to_owned()
     } else if sender.trim().is_empty() {
@@ -161,7 +214,7 @@ fn sender_name(row: &DeletedMessage) -> &str {
     }
 }
 
-fn keep_visible_selection(groups: &[SenderGroup], selected: &mut Option<String>) {
+fn keep_visible_selection(groups: &[DeletedGroup], selected: &mut Option<String>) {
     if !groups
         .iter()
         .any(|group| Some(&group.key) == selected.as_ref())
@@ -174,7 +227,7 @@ fn sender_list(
     app: &mut App,
     ui: &mut egui::Ui,
     narrow: bool,
-    groups: &mut Vec<SenderGroup>,
+    groups: &mut Vec<DeletedGroup>,
     selected: &mut Option<String>,
     show_thread: &mut bool,
     actions: &mut Vec<Action>,
@@ -257,6 +310,25 @@ fn sender_list(
                 },
             );
             ui.add_space(5.0);
+            ui.horizontal_wrapped(|ui| {
+                small(ui, &palette, "Group by");
+                for (mode, label) in [
+                    (DeletedGrouping::Chat, "Chat"),
+                    (DeletedGrouping::Sender, "Sender"),
+                ] {
+                    let response = ui.selectable_label(app.deleted_grouping == mode, label);
+                    #[cfg(any(test, feature = "demo"))]
+                    super::focus::name_button(
+                        ui.ctx(),
+                        &format!("Group deleted by {label}"),
+                        response.id,
+                    );
+                    if response.clicked() {
+                        actions.push(Action::SetDeletedGrouping(mode));
+                    }
+                }
+            });
+            ui.add_space(7.0);
             let width = ui.available_width();
             widgets::search_field(
                 ui,
@@ -278,7 +350,7 @@ fn sender_list(
                 );
             }
         });
-    *groups = sender_groups(app);
+    *groups = message_groups(app);
     keep_visible_selection(groups, selected);
     let before_keyboard = selected.clone();
     search_keyboard(ui, groups, selected, show_thread, narrow);
@@ -310,7 +382,11 @@ fn sender_list(
             }
             for group in groups.iter() {
                 let latest = &app.deleted_messages[group.latest];
-                let response = sender_row(ui, &palette, app.locale, account, group, latest, selected.as_deref() == Some(&group.key));
+                let id = match app.deleted_grouping {
+                    DeletedGrouping::Chat => chat_row_id(account, &group.key),
+                    DeletedGrouping::Sender => sender_row_id(account, &group.key),
+                };
+                let response = sender_row(ui, &palette, app.locale, id, group, latest, selected.as_deref() == Some(&group.key));
                 if reveal_selected && selected.as_deref() == Some(&group.key) {
                     response.scroll_to_me(Some(Align::Center));
                 }
@@ -365,7 +441,7 @@ fn header_room(ui: &egui::Ui, content: f32) -> super::CaptionRoom {
 
 fn search_keyboard(
     ui: &egui::Ui,
-    groups: &[SenderGroup],
+    groups: &[DeletedGroup],
     selected: &mut Option<String>,
     show_thread: &mut bool,
     narrow: bool,
@@ -402,14 +478,14 @@ fn sender_row(
     ui: &mut egui::Ui,
     palette: &Palette,
     locale: Locale,
-    account: &str,
-    group: &SenderGroup,
+    id: egui::Id,
+    group: &DeletedGroup,
     latest: &DeletedMessage,
     selected: bool,
 ) -> egui::Response {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::hover());
     let response = ui
-        .interact(rect, sender_row_id(account, &group.key), Sense::click())
+        .interact(rect, id, Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     theme::reveal_focus(&response);
     let preview = preview_text(latest);
@@ -510,9 +586,13 @@ fn preview_text(row: &DeletedMessage) -> String {
     }
 }
 
-fn message_count(group: &SenderGroup) -> String {
+fn message_count(group: &DeletedGroup) -> String {
     let count = group.rows.len();
-    let kind = if group.matching { "matching" } else { "saved" };
+    let kind = if group.matching {
+        "matching deleted"
+    } else {
+        "deleted"
+    };
     let noun = if count == 1 { "message" } else { "messages" };
     format!("{count} {kind} {noun}")
 }
@@ -520,7 +600,7 @@ fn message_count(group: &SenderGroup) -> String {
 fn thread(
     app: &App,
     ui: &mut egui::Ui,
-    groups: &[SenderGroup],
+    groups: &[DeletedGroup],
     selected: Option<&str>,
     narrow: bool,
     actions: &mut Vec<Action>,
@@ -544,7 +624,14 @@ fn thread(
                         small(
                             ui,
                             &palette,
-                            "Select a sender to read their retained messages.",
+                            match app.deleted_grouping {
+                                DeletedGrouping::Chat => {
+                                    "Select a chat to read deleted messages and their context."
+                                }
+                                DeletedGrouping::Sender => {
+                                    "Select a sender to read their deleted messages and context."
+                                }
+                            },
                         );
                     });
                 });
@@ -553,116 +640,403 @@ fn thread(
             let header_width = ui.available_width();
             let header = Frame::new()
                 .fill(palette.panel)
-                .inner_margin(Margin::symmetric(18, 8))
+                .inner_margin(Margin::symmetric(18, 10))
                 .show(ui, |ui| {
                     ui.set_width((header_width - 36.0).max(0.0));
                     let room = header_room(ui, 200.0);
                     ui.add_space(room.top);
-                    ui.allocate_ui_with_layout(
-                        vec2(ui.available_width(), 44.0),
-                        Layout::left_to_right(Align::Center),
-                        |ui| {
-                            ui.add_space(room.left);
-                            if narrow
-                                && theme::icon_button(
-                                    ui,
-                                    Icon::ArrowLeft,
-                                    19.0,
-                                    palette.secondary,
-                                    palette.text,
-                                    "Back to senders",
-                                )
-                                .clicked()
-                            {
-                                actions.push(Action::BackDeleted);
-                            }
-                            widgets::avatar(ui, &palette, &group.name, &group.key, 36.0, None);
-                            ui.add_space(4.0);
-                            let name_width = (ui.available_width() - room.right).max(0.0);
-                            ui.allocate_ui_with_layout(
-                                vec2(name_width, 38.0),
-                                Layout::top_down(Align::Min),
-                                |ui| {
-                                    ui.set_width(name_width);
-                                    theme::text(
-                                        ui,
-                                        &group.name,
-                                        theme::semibold(16.0),
-                                        palette.text,
-                                    );
-                                    theme::text(
-                                        ui,
-                                        format!("{} · independent copies", message_count(group)),
-                                        theme::regular(12.0),
-                                        palette.secondary,
-                                    );
+                    ui.horizontal(|ui| {
+                        ui.add_space(room.left);
+                        if narrow
+                            && theme::icon_button(
+                                ui,
+                                Icon::ArrowLeft,
+                                19.0,
+                                palette.secondary,
+                                palette.text,
+                                match app.deleted_grouping {
+                                    DeletedGrouping::Chat => "Back to deleted chats",
+                                    DeletedGrouping::Sender => "Back to senders",
                                 },
+                            )
+                            .clicked()
+                        {
+                            actions.push(Action::BackDeleted);
+                        }
+                        widgets::avatar(ui, &palette, &group.name, &group.key, 36.0, None);
+                        ui.add_space(4.0);
+                        ui.vertical(|ui| {
+                            ui.set_width((ui.available_width() - room.right).max(0.0));
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&group.name)
+                                        .font(theme::semibold(16.0))
+                                        .color(palette.text),
+                                )
+                                .wrap(),
                             );
-                        },
-                    );
+                            small(ui, &palette, &message_count(group));
+                        });
+                    });
+                    if app.deleted_grouping == DeletedGrouping::Chat {
+                        ui.add_space(8.0);
+                        ui.horizontal_wrapped(|ui| {
+                            export_chat(ui, app, &group.key, actions);
+                            small(ui, &palette, "Deleted messages + context");
+                        });
+                    }
+                    if app.capture_export.is_some() {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spinner();
+                            small(ui, &palette, "Exporting plaintext…");
+                            if ui.small_button("Cancel export").clicked() {
+                                actions.push(Action::CancelCaptureExport);
+                            }
+                        });
+                    }
+                    if let Some(error) = &app.deleted_context_error {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(error)
+                                    .font(theme::regular(12.0))
+                                    .color(palette.danger),
+                            )
+                            .wrap(),
+                        );
+                    } else if app.deleted_context_loading {
+                        small(ui, &palette, "Updating context…");
+                    }
                 });
             ui.painter().hline(
                 header.response.rect.x_range(),
                 header.response.rect.bottom(),
                 egui::Stroke::new(1.0, palette.outline),
             );
-            if app.capture_export.is_some() {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Exporting plaintext…");
-                    if ui.small_button("Cancel export").clicked() {
-                        actions.push(Action::CancelCaptureExport);
-                    }
-                });
+
+            let rows = thread_rows(app, group);
+            let mut sections: Vec<(String, String, Vec<&RetainedMessage>)> = Vec::new();
+            for row in rows.iter() {
+                let chat = &row.message.canonical_chat;
+                if !app.chat(chat).is_some_and(|chat| !chat.locked)
+                    || !group
+                        .rows
+                        .iter()
+                        .any(|&index| app.deleted_messages[index].canonical_chat == *chat)
+                {
+                    continue;
+                }
+                if let Some(section) = sections.iter_mut().find(|section| section.0 == *chat) {
+                    section.2.push(row);
+                } else {
+                    sections.push((chat.clone(), row.message.chat_name.clone(), vec![row]));
+                }
             }
-            egui::ScrollArea::vertical()
-                .id_salt(("deleted-thread", app.account().id.as_str(), &group.key))
+            for (_, _, rows) in &mut sections {
+                rows.sort_by_key(|row| (row.message.saved.sent_at, row.message.saved.sequence));
+            }
+            sections.sort_by_key(|(chat, _, rows)| {
+                (
+                    std::cmp::Reverse(
+                        rows.iter()
+                            .filter(|row| row.anchor)
+                            .map(|row| row.message.saved.sequence)
+                            .max()
+                            .unwrap_or_default(),
+                    ),
+                    chat.clone(),
+                )
+            });
+            let viewport_id =
+                thread_viewport_id(app.account().id.as_str(), app.deleted_grouping, &group.key);
+            let mut row_rects = Vec::new();
+            let output = egui::ScrollArea::vertical()
+                .id_salt((
+                    "deleted-thread",
+                    app.account().id.as_str(),
+                    app.deleted_grouping == DeletedGrouping::Chat,
+                    &group.key,
+                ))
                 .auto_shrink([false, false])
-                .stick_to_bottom(true)
                 .show(ui, |ui| {
                     Frame::new()
-                        .inner_margin(Margin::symmetric(if narrow { 14 } else { 28 }, 16))
+                        .inner_margin(Margin::symmetric(if narrow { 14 } else { 24 }, 16))
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
-                            let mut previous_day = None;
-                            let mut previous_chat: Option<&str> = None;
-                            for &index in &group.rows {
-                                let row = &app.deleted_messages[index];
-                                let day = crate::util::day_key(row.saved.observed_at);
-                                if day != previous_day || previous_chat.is_none() {
-                                    day_separator(ui, &palette, app.locale, row.saved.observed_at);
-                                    previous_day = day;
-                                }
-                                if previous_chat != Some(&row.canonical_chat) {
-                                    ui.add_space(7.0);
-                                    ui.horizontal(|ui| {
-                                        theme::icon(ui, Icon::MessageCircle, 12.0, palette.dim);
-                                        theme::text(
+                            for (chat, name, rows) in sections {
+                                if app.deleted_grouping == DeletedGrouping::Sender {
+                                    ui.add_space(8.0);
+                                    ui.horizontal_wrapped(|ui| {
+                                        theme::icon(
                                             ui,
-                                            &row.chat_name,
-                                            theme::medium(11.5),
+                                            Icon::MessageCircle,
+                                            14.0,
                                             palette.secondary,
                                         );
+                                        theme::text(ui, &name, theme::semibold(14.0), palette.text);
+                                        export_chat(ui, app, &chat, actions);
                                     });
-                                    ui.add_space(3.0);
-                                    previous_chat = Some(&row.canonical_chat);
+                                    ui.add_space(6.0);
+                                    ui.separator();
                                 }
-                                ui.push_id((row.saved.sequence, "retained-message"), |ui| {
-                                    message_bubble(
-                                        ui,
-                                        &palette,
-                                        app.locale,
-                                        row,
-                                        app.capture_export.is_some(),
-                                        actions,
-                                    );
-                                });
-                                ui.add_space(7.0);
+                                let mut previous_day = None;
+                                for (index, row) in rows.into_iter().enumerate() {
+                                    let saved = &row.message.saved;
+                                    let day = crate::util::day_key(saved.sent_at);
+                                    if day != previous_day {
+                                        day_separator(ui, &palette, app.locale, saved.sent_at);
+                                        previous_day = day;
+                                    }
+                                    if index > 0 && row.gap_before {
+                                        context_note(ui, &palette, "Other messages omitted");
+                                    }
+                                    if row.missing_before {
+                                        context_note(ui, &palette, "No earlier saved message");
+                                    }
+                                    let rect = ui
+                                        .push_id(
+                                            (&chat, &saved.message_id, "retained-message"),
+                                            |ui| message_bubble(ui, app, row, actions),
+                                        )
+                                        .inner;
+                                    row_rects.push((chat.clone(), saved.message_id.clone(), rect));
+                                    if row.missing_after {
+                                        context_note(ui, &palette, "No later saved message yet");
+                                    }
+                                    ui.add_space(9.0);
+                                }
+                                ui.add_space(12.0);
                             }
-                            ui.add_space(8.0);
                         });
                 });
+            preserve_viewport(ui, viewport_id, &output, &row_rects);
         });
+}
+
+/// Keep a same-chat/sender projection while it gains anchors. A narrowed search
+/// shows only matching originals, retaining their already loaded revision tails.
+fn thread_rows<'a>(app: &'a App, group: &DeletedGroup) -> Cow<'a, [RetainedMessage]> {
+    let expected = anchor_sequences(app, group);
+    let same_scope = app
+        .deleted_context_scope
+        .as_ref()
+        .is_some_and(|(mode, key)| *mode == app.deleted_grouping && *key == group.key);
+    let previous_anchors = app
+        .deleted_context
+        .iter()
+        .filter(|row| row.anchor)
+        .map(|row| row.message.saved.sequence)
+        .collect::<Vec<_>>();
+    let keeps_previous = same_scope
+        && !previous_anchors.is_empty()
+        && previous_anchors
+            .iter()
+            .all(|sequence| expected.binary_search(sequence).is_ok());
+    if keeps_previous && previous_anchors.len() == expected.len() {
+        return Cow::Borrowed(&app.deleted_context);
+    }
+    let mut rows = if keeps_previous {
+        app.deleted_context.clone()
+    } else {
+        Vec::new()
+    };
+    for &index in &group.rows {
+        let original = &app.deleted_messages[index];
+        let cached = same_scope
+            .then(|| {
+                app.deleted_context.iter().find(|row| {
+                    row.message.canonical_chat == original.canonical_chat
+                        && row.message.saved.message_id == original.saved.message_id
+                })
+            })
+            .flatten();
+        if let Some(existing) = rows.iter_mut().find(|row| {
+            row.message.canonical_chat == original.canonical_chat
+                && row.message.saved.message_id == original.saved.message_id
+        }) {
+            if !existing.anchor {
+                existing.anchor = true;
+                existing.message = anchor_with_cached_history(original, cached);
+            }
+        } else {
+            rows.push(RetainedMessage {
+                message: anchor_with_cached_history(original, cached),
+                anchor: true,
+                gap_before: false,
+                missing_before: false,
+                missing_after: false,
+            });
+        }
+    }
+    Cow::Owned(rows)
+}
+
+fn anchor_with_cached_history(
+    original: &DeletedMessage,
+    cached: Option<&RetainedMessage>,
+) -> DeletedMessage {
+    let mut message = original.clone();
+    if let Some(cached) = cached {
+        let first_page_end = message
+            .saved
+            .history
+            .last()
+            .map_or(0, |event| event.sequence);
+        message.saved.history.extend(
+            cached
+                .message
+                .saved
+                .history
+                .iter()
+                .filter(|event| event.sequence > first_page_end)
+                .cloned(),
+        );
+        if cached
+            .message
+            .saved
+            .history
+            .last()
+            .is_some_and(|event| event.sequence > first_page_end)
+        {
+            message.saved.history_truncated = cached.message.saved.history_truncated;
+        }
+    }
+    message
+}
+
+#[derive(Clone)]
+struct ThreadViewport {
+    anchor: Option<(String, String, f32)>,
+    offset: f32,
+}
+
+fn thread_viewport_id(account: &str, grouping: DeletedGrouping, key: &str) -> egui::Id {
+    egui::Id::new((
+        "deleted-viewport-anchor",
+        account,
+        grouping == DeletedGrouping::Chat,
+        key,
+    ))
+}
+
+#[cfg(test)]
+pub(crate) fn viewport_anchor(
+    ctx: &egui::Context,
+    account: &str,
+    grouping: DeletedGrouping,
+    key: &str,
+) -> Option<(String, String, f32)> {
+    ctx.data(|data| data.get_temp::<ThreadViewport>(thread_viewport_id(account, grouping, key)))?
+        .anchor
+}
+
+/// Retain the message being read when context or inline histories grow above it.
+/// User scrolling always wins; the initial top stays at the start of its context.
+fn preserve_viewport(
+    ui: &egui::Ui,
+    memory_id: egui::Id,
+    output: &egui::scroll_area::ScrollAreaOutput<()>,
+    rows: &[(String, String, Rect)],
+) {
+    let previous = ui
+        .ctx()
+        .data(|data| data.get_temp::<ThreadViewport>(memory_id));
+    let user_scrolled = ui.input(|input| {
+        input.smooth_scroll_delta.y != 0.0
+            || input
+                .raw
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::MouseWheel { .. }))
+            || input.pointer.any_down()
+            || [
+                egui::Key::PageUp,
+                egui::Key::PageDown,
+                egui::Key::Home,
+                egui::Key::End,
+                egui::Key::ArrowUp,
+                egui::Key::ArrowDown,
+                egui::Key::Space,
+            ]
+            .into_iter()
+            .any(|key| input.key_pressed(key))
+    }) || output.state.velocity().y.abs() > 0.1;
+    if let Some(previous) = &previous
+        && previous.offset > 0.5
+        && !user_scrolled
+        && (output.state.offset.y - previous.offset).abs() < 0.5
+        && let Some((chat, message, relative_y)) = &previous.anchor
+        && let Some((_, _, rect)) = rows
+            .iter()
+            .find(|(row_chat, row_id, _)| row_chat == chat && row_id == message)
+    {
+        let delta = rect.top() - output.inner_rect.top() - relative_y;
+        let mut state = output.state;
+        let max_offset = (output.content_size.y - output.inner_rect.height()).max(0.0);
+        let corrected = (state.offset.y + delta).clamp(0.0, max_offset);
+        if (corrected - state.offset.y).abs() >= 0.5 {
+            state.offset.y = corrected;
+            state.store(ui.ctx(), output.id);
+            ui.ctx()
+                .request_discard("retained context above the reading position changed");
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(
+                    memory_id,
+                    ThreadViewport {
+                        anchor: previous.anchor.clone(),
+                        offset: corrected,
+                    },
+                )
+            });
+            return;
+        }
+    }
+    let anchor = rows
+        .iter()
+        .find(|(_, _, rect)| rect.intersects(output.inner_rect))
+        .map(|(chat, message, rect)| {
+            (
+                chat.clone(),
+                message.clone(),
+                rect.top() - output.inner_rect.top(),
+            )
+        });
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(
+            memory_id,
+            ThreadViewport {
+                anchor,
+                offset: output.state.offset.y,
+            },
+        )
+    });
+}
+
+fn export_chat(ui: &mut egui::Ui, app: &App, chat: &str, actions: &mut Vec<Action>) {
+    let response = ui
+        .add_enabled(
+            app.capture_export.is_none(),
+            egui::Button::new("Export chat"),
+        )
+        .on_hover_text("Export all saved deletions and their context from this chat as plaintext");
+    #[cfg(any(test, feature = "demo"))]
+    super::focus::name_button(
+        ui.ctx(),
+        &format!("Export deleted chat {chat}"),
+        response.id,
+    );
+    if response.clicked() {
+        actions.push(Action::ExportDeletedChat {
+            chat: chat.to_owned(),
+        });
+    }
+}
+
+fn context_note(ui: &mut egui::Ui, palette: &Palette, text: &str) {
+    ui.add_space(5.0);
+    ui.vertical_centered(|ui| {
+        small(ui, palette, text);
+    });
+    ui.add_space(5.0);
 }
 
 fn day_separator(ui: &mut egui::Ui, palette: &Palette, locale: Locale, timestamp: i64) {
@@ -673,141 +1047,172 @@ fn day_separator(ui: &mut egui::Ui, palette: &Palette, locale: Locale, timestamp
     ui.add_space(10.0);
 }
 
+/// These semantic roles follow the active palette, including custom themes.
+fn message_palette(palette: &Palette, deleted: bool) -> (Palette, egui::Color32, egui::Color32) {
+    let tone = if deleted {
+        palette.warning
+    } else {
+        palette.link
+    };
+    let fill = theme::blend(palette.chat, tone, if palette.dark { 0.14 } else { 0.09 });
+    let mut inside = *palette;
+    inside.secondary = theme::readable_on(fill, palette.secondary, palette.text, 4.5);
+    inside.dim = inside.secondary;
+    inside.link = theme::readable_on(fill, palette.link, palette.text, 4.5);
+    let label = theme::readable_on(fill, tone, palette.text, 4.5);
+    (inside, fill, label)
+}
+
 fn message_bubble(
     ui: &mut egui::Ui,
-    palette: &Palette,
-    locale: Locale,
-    row: &DeletedMessage,
-    exporting: bool,
+    app: &App,
+    retained: &RetainedMessage,
     actions: &mut Vec<Action>,
-) {
-    let available = ui.available_width();
-    let max_width = available.clamp(0.0, 610.0);
+) -> Rect {
+    let row = &retained.message;
+    let deleted = !row.reason.is_empty();
+    let (palette, fill, label_color) = message_palette(&app.palette, deleted);
+    let width = ui.available_width().min(610.0);
+    let has_history = !row.saved.history.is_empty();
     let text_width = ui
         .painter()
         .layout_no_wrap(row.saved.text.clone(), theme::regular(14.0), palette.text)
         .size()
         .x;
-    let width = (text_width + 24.0).max(230.0).min(max_width);
-    let outgoing = row.saved.outgoing;
-    ui.with_layout(
-        Layout::top_down(if outgoing { Align::RIGHT } else { Align::LEFT }),
-        |ui| {
-            Frame::new()
-                .fill(if outgoing {
-                    palette.bubble_out
-                } else {
-                    palette.bubble_in
-                })
-                .corner_radius(8)
-                .inner_margin(Margin::symmetric(11, 8))
-                .show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.spacing_mut().interact_size.y = 18.0;
-                    ui.spacing_mut().button_padding.y = 2.0;
-                    ui.set_width((width - 22.0).max(0.0));
-                    if !row.saved.text.is_empty() {
-                        body(ui, palette, &row.saved.text);
-                    }
-                    if !row.saved.attachments.is_empty() {
-                        ui.horizontal_wrapped(|ui| {
-                            theme::icon(ui, Icon::Paperclip, 13.0, palette.secondary);
-                            small(ui, palette, &attachment_summary(&row.saved.attachments));
-                        });
-                    }
-                    if row.saved.text.is_empty() && row.saved.attachments.is_empty() {
-                        small(ui, palette, "Saved message");
-                    }
-                    ui.add_space(4.0);
-                    ui.horizontal_wrapped(|ui| {
-                        small(ui, palette, &row.reason);
-                        small(
-                            ui,
-                            palette,
-                            &format!("· Saved {}", crate::util::clock(row.saved.observed_at)),
-                        );
-                    });
-                    let revisions = row
-                        .saved
-                        .history
-                        .iter()
-                        .filter(|event| matches!(event.kind.as_str(), "edited" | "edit_accepted"))
-                        .count();
-                    let details = match revisions {
-                        0 => "Details".to_owned(),
-                        1 => "Details · 1 revision".to_owned(),
-                        _ => format!("Details · {revisions} revisions"),
-                    };
-                    egui::CollapsingHeader::new(
-                        RichText::new(details)
-                            .font(theme::regular(11.5))
-                            .color(palette.secondary),
-                    )
-                    .id_salt("retained-details")
+    let width = if has_history {
+        width
+    } else {
+        (text_width + 28.0).max(300.0).min(width)
+    };
+    let response = ui
+        .with_layout(
+            Layout::top_down(if row.saved.outgoing {
+                Align::RIGHT
+            } else {
+                Align::LEFT
+            }),
+            |ui| {
+                Frame::new()
+                    .fill(fill)
+                    .corner_radius(8)
+                    .inner_margin(Margin::symmetric(13, 10))
                     .show(ui, |ui| {
-                        small(
-                            ui,
-                            palette,
-                            &format!(
-                                "Saved {}",
-                                crate::util::moment_stamp(locale, row.saved.observed_at)
-                            ),
-                        );
-                        if row.saved.sent_at != row.saved.observed_at {
-                            small(
-                                ui,
-                                palette,
-                                &format!(
-                                    "Sent {}",
-                                    crate::util::moment_stamp(locale, row.saved.sent_at)
-                                ),
-                            );
-                        }
-                        attachments(
-                            ui,
-                            palette,
-                            &row.canonical_chat,
-                            &row.saved.attachments,
-                            exporting,
-                            actions,
-                        );
-                        for observation in &row.saved.history {
-                            ui.add_space(9.0);
-                            observation_row(
-                                ui,
-                                palette,
-                                locale,
-                                &row.canonical_chat,
-                                observation,
-                                exporting,
-                                actions,
-                            );
-                        }
-                        if row.saved.history_truncated {
-                            small(
-                                ui,
-                                palette,
-                                "Export the transcript to include the complete history.",
-                            );
-                        }
-                        ui.add_space(8.0);
-                        small(
-                            ui,
-                            palette,
-                            "Exports are plaintext files in a folder you choose.",
-                        );
-                        if ui
-                            .add_enabled(!exporting, egui::Button::new("Export transcript").small())
-                            .clicked()
-                        {
-                            actions.push(Action::ExportCapture {
-                                chat: Some(row.canonical_chat.clone()),
+                        ui.set_width((width - 26.0).max(0.0));
+                        ui.with_layout(Layout::top_down(Align::LEFT), |ui| {
+                            ui.spacing_mut().item_spacing.y = 4.0;
+                            ui.horizontal_wrapped(|ui| {
+                                theme::text(
+                                    ui,
+                                    sender_name(row),
+                                    theme::semibold(12.5),
+                                    palette.text,
+                                );
+                                theme::text(
+                                    ui,
+                                    if deleted { "Deleted" } else { "Context" },
+                                    theme::medium(11.5),
+                                    label_color,
+                                );
                             });
-                        }
-                    });
-                });
-        },
-    );
+                            if !row.saved.text.is_empty() {
+                                body(ui, &palette, &row.saved.text);
+                            }
+                            if row.saved.text.is_empty() && row.saved.attachments.is_empty() {
+                                small(ui, &palette, "Saved message");
+                            }
+                            if !row.saved.attachments.is_empty() {
+                                small(ui, &palette, &attachment_summary(&row.saved.attachments));
+                                attachments(
+                                    ui,
+                                    &palette,
+                                    &row.canonical_chat,
+                                    &row.saved.attachments,
+                                    app.capture_export.is_some(),
+                                    actions,
+                                );
+                            }
+                            if has_history {
+                                ui.add_space(5.0);
+                                ui.separator();
+                                for observation in &row.saved.history {
+                                    observation_row(
+                                        ui,
+                                        &palette,
+                                        app.locale,
+                                        &row.canonical_chat,
+                                        observation,
+                                        app.capture_export.is_some(),
+                                        actions,
+                                    );
+                                    ui.add_space(5.0);
+                                }
+                            }
+                            if row.saved.history_truncated {
+                                let after = row
+                                    .saved
+                                    .history
+                                    .last()
+                                    .map(|observation| observation.sequence)
+                                    .unwrap_or_default();
+                                let key = (
+                                    row.canonical_chat.clone(),
+                                    row.saved.message_id.clone(),
+                                    after,
+                                );
+                                let error_key =
+                                    (row.canonical_chat.clone(), row.saved.message_id.clone());
+                                if let Some(error) = app.deleted_history_errors.get(&error_key) {
+                                    small(ui, &palette, error);
+                                    if ui.small_button("Retry message history").clicked() {
+                                        actions.push(Action::LoadDeletedHistory {
+                                            chat: key.0,
+                                            message: key.1,
+                                            after,
+                                        });
+                                    }
+                                } else {
+                                    let sentinel = ui.add(
+                                        egui::Label::new(
+                                            RichText::new("Loading more history…")
+                                                .font(theme::regular(11.5))
+                                                .color(palette.secondary),
+                                        )
+                                        .wrap(),
+                                    );
+                                    if ui.is_rect_visible(sentinel.rect)
+                                        && !app.deleted_history_loading.contains(&key)
+                                    {
+                                        actions.push(Action::LoadDeletedHistory {
+                                            chat: key.0,
+                                            message: key.1,
+                                            after,
+                                        });
+                                    }
+                                }
+                            }
+                            ui.add_space(3.0);
+                            ui.horizontal_wrapped(|ui| {
+                                if deleted {
+                                    small(ui, &palette, &row.reason);
+                                }
+                                let sent = crate::util::moment_stamp(app.locale, row.saved.sent_at);
+                                let saved =
+                                    crate::util::moment_stamp(app.locale, row.saved.observed_at);
+                                small(ui, &palette, &format!("Sent {sent}"));
+                                if saved != sent {
+                                    small(ui, &palette, &format!("Saved {saved}"));
+                                }
+                            });
+                        });
+                    })
+                    .response
+            },
+        )
+        .inner;
+    if ui.rect_contains_pointer(response.rect) && ui.input(|input| input.pointer.any_click()) {
+        actions.push(Action::FocusDeletedMessage(row.saved.sequence));
+    }
+    response.rect
 }
 
 fn attachment_summary(attachments: &[SavedAttachment]) -> String {
@@ -978,6 +1383,39 @@ fn history_label(kind: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleted_and_context_bubbles_follow_theme_roles_with_readable_text() {
+        let mut custom = Palette::dark();
+        custom.warning = custom.accent;
+        custom.link = custom.danger;
+        for palette in [
+            Palette::dark(),
+            Palette::light(),
+            Palette::messages(),
+            Palette::messages_light(),
+            custom,
+        ] {
+            for deleted in [false, true] {
+                let (inside, fill, label) = message_palette(&palette, deleted);
+                let tone = if deleted {
+                    palette.warning
+                } else {
+                    palette.link
+                };
+                assert_eq!(
+                    fill,
+                    theme::blend(palette.chat, tone, if palette.dark { 0.14 } else { 0.09 })
+                );
+                for foreground in [inside.text, inside.secondary, label] {
+                    assert!(
+                        theme::contrast(foreground, fill) >= 4.5,
+                        "message text must remain readable"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn loaded_original_filter_matches_words_across_fields_and_unicode() {

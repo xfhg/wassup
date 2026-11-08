@@ -6,6 +6,8 @@ use crate::capture::{Capture, CaptureEvent, CaptureStatus};
 impl Worker {
     pub(super) async fn prepare_capture_for_device(&mut self, linked: bool) -> bool {
         if !linked {
+            self.deleted_context.cancel();
+            self.emit(Event::DeletedUnavailable);
             self.capture = None;
             if self.archive.reset_capture_identity_durable().is_err() {
                 self.emit(Event::CaptureStatus(CaptureStatus {

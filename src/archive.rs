@@ -473,6 +473,11 @@ const LINK_PREVIEWS_DISABLED: &str = "link_previews_disabled";
 const LINK_PREVIEWS_DISABLED_AT: &str = "link_previews_disabled_at";
 
 impl Archive {
+    /// Holds a consistent view for read-only projections spanning many queries.
+    pub(crate) fn read_snapshot(&self) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+        self.connection.unchecked_transaction()
+    }
+
     /// Unlocks the on-disk archive with its OS keyring key, migrating plaintext
     /// archives before their first encrypted use. Never falls back to plaintext.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
