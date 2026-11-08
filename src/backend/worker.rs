@@ -43,6 +43,7 @@ mod blocking;
 mod bot_replies;
 mod calls;
 mod capture_bridge;
+mod capture_export;
 mod channel_pictures;
 mod chat_export;
 mod contact_names;
@@ -971,6 +972,7 @@ pub async fn run(
     let mut worker = Worker {
         privacy_ready: privacy_confirmed,
         privacy_confirmed,
+        privacy_write_failed: false,
         privacy_snapshot,
         privacy_reveal_at: (!privacy_confirmed).then(|| Instant::now() + PRIVACY_GRACE),
         privacy_attempts: 0,
@@ -994,6 +996,7 @@ pub async fn run(
         commands,
         waker,
         archive,
+        capture_root: crate::capture::default_root(),
         capture: None,
         capture_media: None,
         capture_monitor: None,
@@ -1076,6 +1079,7 @@ pub async fn run(
         poll_sending: HashSet::new(),
         prefetch: prefetch::State::default(),
         chat_export: chat_export::State::default(),
+        capture_export: capture_export::State::default(),
         older_serial: 0,
         late_older: VecDeque::new(),
         older_ids_match: false,
@@ -1237,6 +1241,7 @@ pub async fn run(
         }
     }
     worker.stop_chat_export().await;
+    worker.stop_capture_export().await;
     worker.shutdown_call().await;
     worker.stop_bot().await;
 }
@@ -1437,6 +1442,8 @@ struct Worker {
     privacy_ready: bool,
     /// Phone lock state is known to be mirrored in the archive.
     privacy_confirmed: bool,
+    // Failed local lock writes cannot be repaired by a network-only success.
+    privacy_write_failed: bool,
     /// Lock state must be rebuilt from a snapshot rather than caught up.
     privacy_snapshot: bool,
     /// When content is shown even though lock state is still unconfirmed.
@@ -1491,6 +1498,7 @@ struct Worker {
     /// Serial background phone-history prefetch.
     prefetch: prefetch::State,
     chat_export: chat_export::State,
+    capture_export: capture_export::State,
     /// Numbers phone-history requests, so a send result or a late answer is
     /// matched to the request it belongs to rather than to whichever request
     /// the chat has now.
@@ -1507,6 +1515,8 @@ struct Worker {
     commands: mpsc::UnboundedSender<Command>,
     waker: Waker,
     archive: Archive,
+    /// Stable across capture replacement, relinking, and fixture restarts.
+    capture_root: PathBuf,
     capture: Option<Arc<crate::capture::Capture>>,
     capture_media: Option<crate::capture::media::MediaWorker>,
     capture_monitor: Option<tokio::task::JoinHandle<()>>,
@@ -2153,6 +2163,7 @@ impl Worker {
         self.group_info_requested.remove(chat);
         self.group_info_tries.remove(chat);
         self.cancel_chat_export_for(chat);
+        self.cancel_capture_export_for(chat);
         match self.archive.remove_chat_through(chat, through, true) {
             Ok(removed) => {
                 self.pending_older.remove(chat);
@@ -2192,6 +2203,7 @@ impl Worker {
     /// Empties a chat through `through`; false when the archive could not.
     fn empty_chat(&mut self, chat: &str, through: i64, delete_media: bool) -> bool {
         self.cancel_chat_export_for(chat);
+        self.cancel_capture_export_for(chat);
         match self.archive.remove_chat_through(chat, through, false) {
             Ok(removed) => {
                 self.pending_older.remove(chat);
@@ -2242,6 +2254,7 @@ impl Worker {
     }
 
     fn emit_chats_mapped(&mut self, mapping: Option<(ChatId, ChatId)>) {
+        self.recheck_capture_export();
         match self.archive.chats() {
             Ok(mut chats) => {
                 // Early preference sync can create an empty privacy-id row.
@@ -2301,11 +2314,15 @@ impl Worker {
             Ok(Some(mut chat)) => {
                 if chat.locked {
                     self.cancel_chat_export_for(id);
+                    self.cancel_capture_export_for(id);
                 }
                 self.polish_chat(&mut chat);
                 self.emit(Event::ChatUpdated(Box::new(chat)));
             }
-            _ => self.cancel_chat_export_for(id),
+            _ => {
+                self.cancel_chat_export_for(id);
+                self.cancel_capture_export_for(id);
+            }
         }
     }
 
@@ -3139,25 +3156,7 @@ impl Worker {
                 return;
             }
         };
-        if !linked {
-            self.capture = None;
-            if self.archive.reset_capture_identity_durable().is_err() {
-                self.emit(Event::CaptureStatus(crate::capture::CaptureStatus {
-                    paused: true,
-                    error: Some(
-                        "Cannot reset the archive identity. Check storage access and reconnect."
-                            .into(),
-                    ),
-                    root: crate::capture::default_root(),
-                    ..Default::default()
-                }));
-                self.set_status(LinkStatus::Failed(
-                    "Capture paused: the previous archive identity could not be reset".into(),
-                ));
-                return;
-            }
-        }
-        if !self.prepare_capture().await {
+        if !self.prepare_capture_for_device(linked).await {
             return;
         }
         let sender = self.wa_sender.clone();
@@ -3341,6 +3340,7 @@ impl Worker {
             self.privacy_reveal_at = Some(Instant::now() + PRIVACY_GRACE);
         }
         self.privacy_recovering = true;
+        self.privacy_write_failed = false;
         let sender = self.wa_sender.clone();
         let generation = self.privacy_generation;
         // Chat locks live in RegularLow. A snapshot discards and rebuilds the
@@ -3403,6 +3403,7 @@ impl Worker {
         }
         self.privacy_recovering = false;
         if locks
+            && !self.privacy_write_failed
             && (!complete
                 || self
                     .archive
@@ -4498,11 +4499,18 @@ impl Worker {
             E::StarUpdate(update) => self.star_update(update),
             E::LockChatUpdate(update) => {
                 let chat = self.canonical(&update.jid);
-                self.ensure_chat(&chat, None);
                 let locked = update.action.locked.unwrap_or(false);
-                let _ =
-                    self.archive
-                        .set_locked_at(&chat, locked, update.timestamp.timestamp_millis());
+                if locked {
+                    self.cancel_capture_export_for(&chat);
+                }
+                self.ensure_chat(&chat, None);
+                if self
+                    .archive
+                    .set_locked_at(&chat, locked, update.timestamp.timestamp_millis())
+                    .is_err()
+                {
+                    self.capture_lock_write_failed();
+                }
                 self.emit_chat(&chat);
             }
             E::DeleteChatUpdate(update) => {
@@ -4720,6 +4728,7 @@ impl Worker {
 
     async fn on_logged_out(&mut self) {
         self.stop_chat_export().await;
+        self.stop_capture_export().await;
         self.contact_generation = self.contact_generation.wrapping_add(1);
         self.privacy_generation = self.privacy_generation.wrapping_add(1);
         self.message_removals_in_flight.clear();
@@ -4794,6 +4803,7 @@ impl Worker {
         self.emit(Event::Drafts(Vec::new()));
         self.privacy_ready = false;
         self.privacy_confirmed = false;
+        self.privacy_write_failed = false;
         self.privacy_snapshot = false;
         self.phone_unarchive_chats = None;
         self.phone_unarchive_unread = false;
@@ -4817,7 +4827,7 @@ impl Worker {
             self.emit(Event::CaptureStatus(crate::capture::CaptureStatus {
                 paused: true,
                 error: Some("Cannot reset the archive identity after unlinking. Check storage access and restart Wassup.".into()),
-                root: crate::capture::default_root(),
+                root: self.capture_root.clone(),
                 ..Default::default()
             }));
             self.set_status(LinkStatus::Failed(
@@ -7470,7 +7480,18 @@ impl Worker {
                 self.chat_export.allowed = allowed;
                 if !allowed {
                     self.stop_chat_export().await;
+                    self.stop_capture_export().await;
                 }
+            }
+            Command::ExportCapture { request, selection } => {
+                self.begin_capture_export(request, selection).await
+            }
+            Command::CancelCaptureExport => self.stop_capture_export().await,
+            Command::CaptureExportTarget { request, target } => {
+                self.capture_export_target(request, target)
+            }
+            Command::CaptureExportFinished { request, result } => {
+                self.capture_export_finished(request, result)
             }
             Command::ExportChat {
                 request,
@@ -8891,7 +8912,12 @@ impl Worker {
                 self.emit_chat(&chat);
             }
             Command::SetLocked(chat, locked) => {
-                let _ = self.archive.set_locked(&chat, locked);
+                if locked {
+                    self.cancel_capture_export_for(&chat);
+                }
+                if self.archive.set_locked(&chat, locked).is_err() {
+                    self.capture_lock_write_failed();
+                }
                 self.emit_chat(&chat);
                 self.tell_phone(&chat, move |client, jid| async move {
                     if locked {
@@ -20264,6 +20290,7 @@ mod receipt_tests {
         let worker = Worker {
             privacy_ready: true,
             privacy_confirmed: true,
+            privacy_write_failed: false,
             privacy_snapshot: false,
             privacy_reveal_at: None,
             privacy_attempts: 0,
@@ -20287,6 +20314,7 @@ mod receipt_tests {
             commands,
             waker: Waker::default(),
             archive: Archive::in_memory().expect("archive"),
+            capture_root: root.join("external-capture"),
             capture: Some(
                 crate::capture::Capture::open(&root.join("external-capture"), "fixture")
                     .expect("capture fixture"),
@@ -20372,6 +20400,7 @@ mod receipt_tests {
             poll_sending: HashSet::new(),
             prefetch: prefetch::State::default(),
             chat_export: chat_export::State::default(),
+            capture_export: capture_export::State::default(),
             older_serial: 0,
             late_older: VecDeque::new(),
             older_ids_match: false,

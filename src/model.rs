@@ -2728,11 +2728,16 @@ pub enum Action {
     FocusDeletedSearch,
     /// Returns from a retained sender's thread to the sender list, then Chats.
     BackDeleted,
-    /// Opens a retained file only while its source chat remains unlocked.
-    OpenSavedFile {
+    /// Exports one retained chat, or all known unlocked chats, as plaintext.
+    ExportCapture {
+        chat: Option<ChatId>,
+    },
+    /// Saves a decrypted attachment only after an explicit destination choice.
+    ExportSavedAttachment {
         chat: ChatId,
         path: PathBuf,
     },
+    CancelCaptureExport,
     /// Opens settings, or closes them when they are already showing.
     ToggleSettings,
     /// Steps back to the previously visited page, chat, or dialog, as a

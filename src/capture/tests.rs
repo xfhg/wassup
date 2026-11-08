@@ -56,20 +56,19 @@ fn renaming_the_archive_preserves_records_links_and_pending_media() {
         .record_incoming(&body, &info("pending-photo"), "durable_inbound")
         .unwrap();
     let pending_job = capture.claim_media_job().unwrap().unwrap();
-    capture.render_pending().unwrap();
+    assert!(!capture.root().join("chats").exists());
     let original_events = events(&capture);
     let account_folder = capture.root().file_name().unwrap().to_owned();
     let readme = fs::read(old_root.join("WASSUP-README.md")).unwrap();
 
-    // Like quitting the app before the real move: no writer/renderer may
-    // recreate the old location after its root has changed.
+    // Like quitting the app before the real move, release all journal handles.
     let closed = Arc::downgrade(&capture.inner);
     drop(capture);
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while closed.strong_count() > 0 {
         assert!(
             std::time::Instant::now() < deadline,
-            "fixture renderer did not close"
+            "fixture journal did not close"
         );
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -97,9 +96,21 @@ fn renaming_the_archive_preserves_records_links_and_pending_media() {
         .unwrap();
     let relocated_path = reopened.root().join("media/fixture.jpg");
     assert_eq!(photo.attachments[0].path.as_ref(), Some(&relocated_path));
-    assert_eq!(fs::read(&relocated_path).unwrap(), b"fixture");
+    assert_ne!(fs::read(&relocated_path).unwrap(), b"fixture");
+    let exported = fixture.path().join("exported");
+    reopened
+        .export_readable(&exported, &[CHAT.to_owned()])
+        .unwrap();
+    assert_eq!(
+        fs::read(exported.join("media/fixture.jpg")).unwrap(),
+        b"fixture"
+    );
     assert!(photo.markdown_path.starts_with(reopened.root()));
-    let markdown = fs::read_to_string(&photo.markdown_path).unwrap();
+    assert!(!photo.markdown_path.exists());
+    let markdown = fs::read_to_string(
+        exported.join(photo.markdown_path.strip_prefix(reopened.root()).unwrap()),
+    )
+    .unwrap();
     assert!(markdown.contains("[Open file](../media/fixture.jpg)"));
     assert!(!markdown.contains(old_root.to_string_lossy().as_ref()));
     let persisted_path: String = reopened
@@ -215,8 +226,12 @@ fn originals_repeated_edits_and_revoke_survive_and_replay_is_idempotent() {
     assert_eq!(records[1].1, "B");
     assert_eq!(records[2].1, "A\nSecond line");
     assert_eq!(records[3].0, "deleted");
-    capture.render_pending().unwrap();
-    let page = fs::read_dir(capture.root().join("chats"))
+    let exports = tempfile::tempdir().unwrap();
+    let exported = exports.path().join("readable");
+    capture
+        .export_readable(&exported, &[CHAT.to_owned()])
+        .unwrap();
+    let page = fs::read_dir(exported.join("chats"))
         .unwrap()
         .next()
         .unwrap()
@@ -553,8 +568,12 @@ fn own_message_echo_uses_local_original_and_does_not_hide_edits() {
             ..Default::default()
         })
         .unwrap();
-    capture.render_pending().unwrap();
-    let page = fs::read_dir(capture.root().join("chats"))
+    let exports = tempfile::tempdir().unwrap();
+    let exported = exports.path().join("readable");
+    capture
+        .export_readable(&exported, &[CHAT.to_owned()])
+        .unwrap();
+    let page = fs::read_dir(exported.join("chats"))
         .unwrap()
         .next()
         .unwrap()
@@ -567,5 +586,146 @@ fn own_message_echo_uses_local_original_and_does_not_hide_edits() {
         events(&capture).len(),
         2,
         "journal preserves both observations"
+    );
+}
+
+#[test]
+fn capture_is_encrypted_and_readable_only_when_explicitly_exported() {
+    let archive = tempfile::tempdir().unwrap();
+    let capture = Capture::open(archive.path(), "encrypted-fixture").unwrap();
+    let marker = "PRIVATE_SYNTHETIC_MARKER_54ee";
+    capture
+        .record_incoming(&text(marker), &info("secret"), "durable_inbound")
+        .unwrap();
+    assert!(!capture.root().join("chats").exists());
+    assert!(!capture.root().join("index.md").exists());
+    // The in-app projection remains directly available without an export.
+    assert_eq!(
+        capture.saved_messages(None, 10).unwrap().messages[0].text,
+        marker
+    );
+    let plain = Connection::open(capture.root().join("journal.sqlite3")).unwrap();
+    assert!(
+        plain
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row
+                .get::<_, i64>(0))
+            .is_err()
+    );
+    for name in ["journal.sqlite3", "journal.sqlite3-wal"] {
+        let bytes = fs::read(capture.root().join(name)).unwrap();
+        assert!(
+            !bytes
+                .windows(marker.len())
+                .any(|bytes| bytes == marker.as_bytes())
+        );
+    }
+    let exports = tempfile::tempdir().unwrap();
+    let destination = exports.path().join("requested");
+    capture
+        .export_readable(&destination, &[CHAT.to_owned()])
+        .unwrap();
+    let page = fs::read_dir(destination.join("chats"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(
+        fs::read_to_string(page)
+            .unwrap()
+            .contains(&escape_markdown(marker))
+    );
+    assert!(!capture.root().join("chats").exists());
+}
+
+#[test]
+fn export_is_scoped_cancelable_and_never_overwrites_a_destination() {
+    use std::sync::atomic::AtomicBool;
+    let archive = tempfile::tempdir().unwrap();
+    let capture = Capture::open(archive.path(), "export-fixture").unwrap();
+    capture
+        .record_incoming(&text("selected"), &info("one"), "durable_inbound")
+        .unwrap();
+    let mut other = info("two");
+    other.source.chat = "15550002222@s.whatsapp.net".parse().unwrap();
+    capture
+        .record_incoming(&text("unselected"), &other, "durable_inbound")
+        .unwrap();
+    let exports = tempfile::tempdir().unwrap();
+    let destination = exports.path().join("selected");
+    assert!(
+        capture
+            .export_readable_cancellable(&destination, &[CHAT.to_owned()], &AtomicBool::new(true))
+            .is_err()
+    );
+    assert!(!destination.exists());
+    assert_eq!(fs::read_dir(exports.path()).unwrap().count(), 0);
+    capture
+        .export_readable(&destination, &[CHAT.to_owned()])
+        .unwrap();
+    assert_eq!(fs::read_dir(destination.join("chats")).unwrap().count(), 1);
+    fs::write(destination.join("keep.txt"), "keep").unwrap();
+    assert!(
+        capture
+            .export_readable(&destination, &[CHAT.to_owned()])
+            .is_err()
+    );
+    assert_eq!(
+        fs::read_to_string(destination.join("keep.txt")).unwrap(),
+        "keep"
+    );
+    assert!(
+        capture
+            .export_readable(&archive.path().join("plaintext"), &[CHAT.to_owned()])
+            .is_err()
+    );
+    assert!(
+        capture
+            .export_readable(&exports.path().join("all"), &[])
+            .is_err()
+    );
+}
+
+#[test]
+fn legacy_readable_files_are_preserved_encrypted_then_removed() {
+    let archive = tempfile::tempdir().unwrap();
+    let capture = Capture::open(archive.path(), "legacy-fixture").unwrap();
+    capture
+        .record_incoming(&text("original"), &info("one"), "durable_inbound")
+        .unwrap();
+    let root = capture.root().to_owned();
+    drop(capture);
+    fs::create_dir(root.join("chats")).unwrap();
+    let name = format!("chats/{}-2026-11.md", hex_digest(CHAT.as_bytes()));
+    let edited = b"A prior generated transcript with a personal annotation";
+    fs::write(root.join(&name), edited).unwrap();
+    fs::write(root.join("index.md"), b"old index").unwrap();
+    let reopened = Capture::open(archive.path(), "legacy-fixture").unwrap();
+    assert!(!root.join("chats").exists());
+    assert!(!root.join("index.md").exists());
+    let saved: Vec<u8> = reopened
+        .reader()
+        .unwrap()
+        .query_row(
+            "SELECT bytes FROM legacy_exports WHERE path=?1 AND chunk=0",
+            [&name],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(saved, edited);
+    assert_eq!(
+        reopened.saved_messages(None, 10).unwrap().messages[0].text,
+        "original"
+    );
+    drop(reopened);
+    let again = Capture::open(archive.path(), "legacy-fixture").unwrap();
+    assert_eq!(
+        again
+            .reader()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM legacy_exports", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
     );
 }

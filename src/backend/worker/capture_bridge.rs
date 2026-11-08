@@ -4,6 +4,28 @@ use super::*;
 use crate::capture::{Capture, CaptureEvent, CaptureStatus};
 
 impl Worker {
+    pub(super) async fn prepare_capture_for_device(&mut self, linked: bool) -> bool {
+        if !linked {
+            self.capture = None;
+            if self.archive.reset_capture_identity_durable().is_err() {
+                self.emit(Event::CaptureStatus(CaptureStatus {
+                    paused: true,
+                    error: Some(
+                        "Cannot reset the archive identity. Check storage access and reconnect."
+                            .into(),
+                    ),
+                    root: self.capture_root.clone(),
+                    ..Default::default()
+                }));
+                self.set_status(LinkStatus::Failed(
+                    "Capture paused: the previous archive identity could not be reset".into(),
+                ));
+                return false;
+            }
+        }
+        self.prepare_capture().await
+    }
+
     pub(super) async fn prepare_capture(&mut self) -> bool {
         if self.capture.is_none() {
             let identity = (|| -> anyhow::Result<String> {
@@ -22,13 +44,12 @@ impl Worker {
                     .set_meta_durable(crate::archive::CAPTURE_ACCOUNT_KEY, &id)?;
                 Ok(id)
             })();
+            let root = self.capture_root.clone();
             let opened = match identity {
-                Ok(id) => tokio::task::spawn_blocking(move || {
-                    Capture::open(&crate::capture::default_root(), &id)
-                })
-                .await
-                .map_err(anyhow::Error::from)
-                .and_then(|result| result),
+                Ok(id) => tokio::task::spawn_blocking(move || Capture::open(&root, &id))
+                    .await
+                    .map_err(anyhow::Error::from)
+                    .and_then(|result| result),
                 Err(error) => Err(error),
             };
             match opened {
@@ -36,8 +57,8 @@ impl Worker {
                 Err(_) => {
                     self.emit(Event::CaptureStatus(CaptureStatus {
                         paused: true,
-                        error: Some("Cannot open the permanent archive. Check its folder permissions and free space, then reconnect.".into()),
-                        root: crate::capture::default_root(),
+                        error: Some("Cannot unlock or migrate the permanent archive. Approve Keychain access, check free space and folder permissions, then reconnect.".into()),
+                        root: self.capture_root.clone(),
                         ..Default::default()
                     }));
                     self.set_status(LinkStatus::Failed(
@@ -140,6 +161,66 @@ mod tests {
     use super::super::receipt_tests::{own_message, worker};
     use super::*;
 
+    #[tokio::test]
+    async fn capture_reset_and_reconnect_keep_the_explicit_fixture_root() {
+        let (mut worker, events, _, _) = worker();
+        let expected = std::fs::canonicalize(&worker.capture_root).unwrap();
+        worker.capture = None;
+        assert!(worker.prepare_capture_for_device(false).await);
+        let original = worker.capture.as_ref().unwrap().clone();
+        assert!(original.root().starts_with(&expected));
+        original
+            .record_event(CaptureEvent {
+                event_id: "saved-before-reset".into(),
+                chat: own_message("fixture", 1_700_000_000).chat,
+                message_id: "saved-before-reset".into(),
+                kind: "message".into(),
+                text: "Synthetic original".into(),
+                timestamp: 1_700_000_000,
+                raw: wa::Message::text("Synthetic original").encode_to_vec(),
+                source: "fixture".into(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        // The same reset branch used by unlinked startup must preserve the
+        // original, choose a new namespace, and never fall back to the home.
+        assert!(worker.prepare_capture_for_device(false).await);
+        let reset_root = worker.capture.as_ref().unwrap().root().to_owned();
+        assert!(reset_root.starts_with(&expected));
+        assert_ne!(reset_root, original.root());
+        assert_eq!(original.saved_messages(None, 10).unwrap().messages.len(), 1);
+
+        // A linked reconnect can recreate its handle without losing either
+        // its namespace or the fixture's storage configuration.
+        worker.capture = None;
+        assert!(worker.prepare_capture_for_device(true).await);
+        assert_eq!(worker.capture.as_ref().unwrap().root(), reset_root);
+        assert!(
+            events
+                .try_iter()
+                .filter_map(|event| match event {
+                    Event::CaptureStatus(status) => Some(status),
+                    _ => None,
+                })
+                .all(|status| status.root.starts_with(&expected))
+        );
+        worker.stop_bot().await;
+    }
+
+    #[tokio::test]
+    async fn unavailable_fixture_capture_reports_its_configured_root() {
+        let (mut worker, events, _, _) = worker();
+        let blocked = worker.capture_root.join("not-a-directory");
+        std::fs::write(&blocked, b"fixture").unwrap();
+        worker.capture_root = blocked.clone();
+        worker.capture = None;
+        assert!(!worker.prepare_capture_for_device(false).await);
+        assert!(worker.capture.is_none());
+        assert!(events.try_iter().any(|event| matches!(event,
+            Event::CaptureStatus(status) if status.paused && status.root == blocked)));
+    }
+
     #[test]
     fn an_unavailable_capture_prevents_outgoing_storage() {
         let (mut worker, events, _, _) = worker();
@@ -169,15 +250,7 @@ mod tests {
             .set_content(&chat, "retained", &Content::Revoked, false)
             .unwrap();
         worker.archive.clear().unwrap();
-        let journal = rusqlite::Connection::open(
-            worker
-                .capture
-                .as_ref()
-                .unwrap()
-                .root()
-                .join("journal.sqlite3"),
-        )
-        .unwrap();
+        let journal = worker.capture.as_ref().unwrap().reader().unwrap();
         let text: String = journal
             .query_row(
                 "SELECT text FROM events WHERE message_id='retained'",

@@ -9,34 +9,57 @@ use crate::backend::DeletedMessage;
 use crate::capture::view::SavedMessage;
 
 const CANDIDATES_PER_PAGE: usize = 100;
+const CANDIDATE_PAGES_PER_REQUEST: usize = 10;
+const DELETED_PER_PAGE: usize = 100;
 const MATERIALIZATION_GRACE_SECONDS: i64 = 5;
 
 impl Worker {
     pub(super) fn load_deleted(&self, request: u64, before: Option<i64>) {
         let result = (|| -> anyhow::Result<_> {
             anyhow::ensure!(
-                self.privacy_ready,
+                self.privacy_ready && self.privacy_confirmed,
                 "Waiting for chat privacy settings before showing saved messages"
             );
             let capture = self
                 .capture
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("The permanent archive is not available"))?;
-            let page = capture.saved_messages(before, CANDIDATES_PER_PAGE)?;
             let now = crate::util::now();
             let mut messages = Vec::new();
-            for saved in page.messages {
-                if let Some(message) = self.classify_deleted(saved, now)? {
-                    messages.push(message);
+            let mut cursor = before;
+            // Ordinary messages and protocol controls can fill many capture
+            // pages without one deletion. Page the filtered result, while
+            // yielding to the worker after a bounded amount of scanning. An
+            // empty response with a cursor asks the UI to continue scanning.
+            for _ in 0..CANDIDATE_PAGES_PER_REQUEST {
+                let page = capture.saved_messages(cursor, CANDIDATES_PER_PAGE)?;
+                let mut candidates = page.messages.into_iter().peekable();
+                while let Some(saved) = candidates.next() {
+                    if let Some(message) = self.classify_deleted(saved, now)? {
+                        let sequence = message.saved.sequence;
+                        messages.push(message);
+                        if messages.len() == DELETED_PER_PAGE {
+                            // A full result can stop inside a candidate page.
+                            // Resume after the last returned original, not at
+                            // that page's end, so no older result is skipped.
+                            let next = (candidates.peek().is_some() || page.next_before.is_some())
+                                .then_some(sequence);
+                            return Ok((messages, next));
+                        }
+                    }
+                }
+                cursor = page.next_before;
+                if cursor.is_none() {
+                    break;
                 }
             }
-            Ok((messages, page.next_before))
+            Ok((messages, cursor))
         })();
 
         let (messages, next_before, error) = match result {
             Ok((messages, next_before)) => (messages, next_before, None),
             Err(_) => {
-                let message = if !self.privacy_ready {
+                let message = if !self.privacy_ready || !self.privacy_confirmed {
                     "Waiting for chat privacy settings before showing saved messages"
                 } else if self.capture.is_none() {
                     "The permanent archive is not available"
@@ -61,7 +84,7 @@ impl Worker {
         saved: SavedMessage,
         now: i64,
     ) -> anyhow::Result<Option<DeletedMessage>> {
-        if !self.privacy_ready {
+        if !self.privacy_ready || !self.privacy_confirmed {
             return Ok(None);
         }
         let canonical_chat = self.canonical_str(&saved.chat);
@@ -199,6 +222,127 @@ mod tests {
 
     fn known_chat(worker: &Worker) {
         worker.archive.ensure_chat(PEER, "Synthetic chat").unwrap();
+    }
+
+    fn capture_original(worker: &Worker, id: &str, deleted: bool, visible: bool) {
+        worker
+            .capture
+            .as_ref()
+            .unwrap()
+            .record_event(crate::capture::CaptureEvent {
+                event_id: format!("fixture:{id}"),
+                chat: PEER.into(),
+                message_id: id.into(),
+                sender: PEER.into(),
+                kind: "message".into(),
+                text: "Synthetic captured original".into(),
+                timestamp: 100,
+                source: "incoming_event".into(),
+                direction: "incoming".into(),
+                raw: if visible {
+                    wa::Message::text("Synthetic captured original").encode_to_vec()
+                } else {
+                    wa::Message::default().encode_to_vec()
+                },
+                ..Default::default()
+            })
+            .unwrap();
+        if deleted {
+            worker.archive.delete_message(PEER, id).unwrap();
+        } else {
+            worker
+                .archive
+                .insert_message(&own_message(id, 100), None)
+                .unwrap();
+        }
+    }
+
+    fn deleted_response(
+        events: &std::sync::mpsc::Receiver<Event>,
+        expected_request: u64,
+    ) -> (Vec<DeletedMessage>, Option<i64>) {
+        events
+            .try_iter()
+            .find_map(|event| match event {
+                Event::DeletedLoaded {
+                    request,
+                    messages,
+                    next_before,
+                    error,
+                } if request == expected_request => {
+                    assert!(error.is_none(), "synthetic saved-message read failed");
+                    Some((messages, next_before))
+                }
+                _ => None,
+            })
+            .expect("deleted page response")
+    }
+
+    #[test]
+    fn deleted_page_scans_past_recent_normal_messages() {
+        let (worker, events, _, _) = worker();
+        known_chat(&worker);
+        capture_original(&worker, "older-deletion", true, true);
+        for index in 0..205 {
+            capture_original(&worker, &format!("normal-{index}"), false, true);
+        }
+
+        worker.load_deleted(1, None);
+        let (messages, next) = deleted_response(&events, 1);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].saved.message_id, "older-deletion");
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn deleted_page_limit_resumes_inside_candidate_page_without_skipping_results() {
+        let (worker, events, _, _) = worker();
+        known_chat(&worker);
+        for index in 0..110 {
+            capture_original(&worker, &format!("deleted-{index}"), true, true);
+        }
+        for index in 0..125 {
+            capture_original(&worker, &format!("normal-{index}"), false, true);
+        }
+
+        worker.load_deleted(1, None);
+        let (first, cursor) = deleted_response(&events, 1);
+        assert_eq!(first.len(), DELETED_PER_PAGE);
+        assert_eq!(cursor, first.last().map(|row| row.saved.sequence));
+        worker.load_deleted(2, cursor);
+        let (second, next) = deleted_response(&events, 2);
+        assert_eq!(second.len(), 10);
+        assert_eq!(next, None);
+        let actual = first
+            .into_iter()
+            .chain(second)
+            .map(|row| row.saved.message_id)
+            .collect::<Vec<_>>();
+        let expected = (0..110)
+            .rev()
+            .map(|index| format!("deleted-{index}"))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn deleted_scan_budget_returns_progress_through_invisible_candidate_pages() {
+        let (worker, events, _, _) = worker();
+        known_chat(&worker);
+        capture_original(&worker, "older-deletion", true, true);
+        for index in 0..CANDIDATES_PER_PAGE * CANDIDATE_PAGES_PER_REQUEST {
+            capture_original(&worker, &format!("control-{index}"), false, false);
+        }
+
+        worker.load_deleted(1, None);
+        let (first, cursor) = deleted_response(&events, 1);
+        assert!(first.is_empty());
+        assert_eq!(cursor, Some(2), "bounded work still makes cursor progress");
+        worker.load_deleted(2, cursor);
+        let (second, next) = deleted_response(&events, 2);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].saved.message_id, "older-deletion");
+        assert_eq!(next, None);
     }
 
     #[test]
@@ -411,5 +555,34 @@ mod tests {
         assert!(events.try_iter().any(|event| matches!(event,
             Event::DeletedLoaded { request: 7, messages, next_before: None, error: Some(_) }
                 if messages.is_empty())));
+    }
+
+    #[test]
+    fn normal_chat_fallback_does_not_expose_permanent_originals() {
+        let (mut worker, events, _, _) = worker();
+        known_chat(&worker);
+        worker.privacy_ready = false;
+        worker.privacy_confirmed = false;
+        worker.reveal_unconfirmed();
+        assert!(
+            worker.privacy_ready,
+            "normal chats keep the upstream fallback"
+        );
+        assert!(!worker.privacy_confirmed);
+        assert!(
+            events
+                .try_iter()
+                .any(|event| matches!(event, Event::Chats(_)))
+        );
+        assert!(
+            worker
+                .classify_deleted(original("saved"), 110)
+                .unwrap()
+                .is_none()
+        );
+        worker.load_deleted(23, None);
+        assert!(events.try_iter().any(|event| matches!(event,
+            Event::DeletedLoaded { request: 23, messages, next_before: None, error: Some(error) }
+                if messages.is_empty() && error.starts_with("Waiting for chat privacy settings"))));
     }
 }

@@ -238,6 +238,20 @@ pub enum Command {
         composing: bool,
     },
     SetChatExportAllowed(bool),
+    /// Explicit plaintext export from the encrypted permanent archive.
+    ExportCapture {
+        request: u64,
+        selection: CaptureExportSelection,
+    },
+    CancelCaptureExport,
+    CaptureExportTarget {
+        request: u64,
+        target: Option<PathBuf>,
+    },
+    CaptureExportFinished {
+        request: u64,
+        result: Result<Option<PathBuf>, String>,
+    },
     ExportChat {
         request: u64,
         chat: ChatId,
@@ -1194,10 +1208,23 @@ pub struct DeletedMessage {
     pub reason: String,
 }
 
+/// The account worker rechecks every source chat after the native picker closes.
+#[derive(Clone, Debug)]
+pub enum CaptureExportSelection {
+    Chats(Vec<ChatId>),
+    Attachment { chat: ChatId, path: PathBuf },
+}
+
 #[derive(Debug)]
 pub enum Event {
     /// Health of the independent, permanent Wassup archive.
     CaptureStatus(crate::capture::CaptureStatus),
+    CaptureExportFinished {
+        request: u64,
+        result: Result<Option<PathBuf>, String>,
+    },
+    /// Discard cached permanent originals after a local privacy-state write failure.
+    DeletedUnavailable,
     DeletedLoaded {
         request: u64,
         messages: Vec<DeletedMessage>,

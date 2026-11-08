@@ -4,41 +4,35 @@
 
 <h1 align="center">Wassup</h1>
 
-A private native WhatsApp client for macOS that keeps the remotely deleted messages, based on [ZapFast](https://github.com/crmne/zapfast)
-0.21.1. It saves received messages, message revisions, and ordinary attachments
-to a separate local archive while it is running and connected.
+A native WhatsApp client for macOS, written in Rust, that preserves deleted
+messages. Based on [ZapFast](https://github.com/crmne/zapfast) 0.21.1.
 
-The archive is in `~/Wassup`. Markdown files provide a readable view;
-the SQLite journal preserves the original observations. Sender deletion does
-not delete this separate copy. Messages that never reach this client and files
-that do not finish downloading cannot be guaranteed.
+- **Deleted messages:** read retained originals in the app, grouped by sender.
+- **Encrypted archive:** messages, revisions, and attachments in `~/Wassup`,
+  unlocked automatically through macOS Keychain.
+- **Export on request:** save readable transcripts or attachments when needed.
+  Exports are plaintext.
+- **Independent profile:** separate WhatsApp pairing; runs after the window closes.
 
-The external archive is unencrypted plaintext and can be read outside the app.
-App and chat locks do not protect these files. Keep this folder and its backups
-private. View-once media, calls, statuses, channels, and historical backfill are
-outside permanent capture. Ordinary attachments are limited to 2 GB each, and
-downloads preserve at least 1 GB of free space.
+## Limits
 
-Open **Deleted** to select a sender and read retained originals in capture order,
-with the source chat shown. **Details** contains revisions, attachments, and the
-saved transcript link. Search covers loaded messages; use **Load more** for older
-copies. In a narrow window, **Back to senders** returns to the list.
+Capture requires Wassup to be running and connected, with the Mac awake.
+Only received messages and completed downloads are protected. View-once
+media, calls, statuses, channels, and historical backfill are excluded.
+Deleted and exports show only known, unlocked chats.
 
-Normal chats still follow WhatsApp deletions. The Deleted tab shows only chats
-known to be unlocked. Removing a whole chat can hide its copies from the tab
-when its lock metadata is gone; the external archive remains intact.
+**Backups need both `~/Wassup` and its Keychain keys.** Recovery-key export is
+not available yet. This is an unofficial client and can risk account suspension.
 
-Wassup uses its own profile and WhatsApp link. It keeps running when its window
-closes, requests login registration on its first supported launch, and disables
-upstream automatic updates. It remains an unofficial WhatsApp client, with the
-account-suspension risk described by upstream ZapFast.
+## Build
 
-Build on Apple Silicon macOS with the Rust toolchain in
-[rust-toolchain.toml](rust-toolchain.toml), Xcode Command Line Tools, CMake,
-and Python 3.11 or later.
+Apple Silicon macOS requires the pinned [Rust toolchain](rust-toolchain.toml),
+Xcode Command Line Tools, CMake, and Python 3.11+.
 
-Run `scripts/build-wassup-macos.sh` to create `dist/Wassup.app`; the script does
-not install or launch it.
+```sh
+scripts/build-wassup-macos.sh
+```
 
-The inherited source is MIT licensed. See [LICENSE](LICENSE) and
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+Creates `dist/Wassup.app`. Install and launch it manually.
+
+MIT licensed. See [LICENSE](LICENSE) and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

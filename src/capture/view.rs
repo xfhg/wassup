@@ -8,11 +8,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Result;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
+use rusqlite::{OptionalExtension, Row, params};
 use whatsapp_rust::prelude::wa;
 use whatsapp_rust::waproto::buffa::Message as _;
 
-use super::{Capture, hex_digest, reject_symlink, relative_media_path};
+use super::{Capture, hex_digest, relative_media_path};
 
 const PAGE_LIMIT: usize = 100;
 const HISTORY_LIMIT: usize = 256;
@@ -44,7 +44,7 @@ pub struct SavedMessage {
     pub send_accepted: bool,
     pub deletion_observed: bool,
     pub source: String,
-    /// A derived file; it may not exist yet if Markdown generation is stale.
+    /// Legacy transcript locator. No plaintext file is generated automatically.
     pub markdown_path: PathBuf,
     pub attachments: Vec<SavedAttachment>,
     /// Immutable target observations in received order. Includes edits,
@@ -85,12 +85,7 @@ impl Capture {
     /// The mutable chat database is deliberately not consulted here.
     pub fn saved_messages(&self, before: Option<i64>, limit: usize) -> Result<SavedMessagePage> {
         let limit = limit.clamp(1, PAGE_LIMIT);
-        let path = self.root().join("journal.sqlite3");
-        reject_symlink(&path)?;
-        let mut reader = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
+        let mut reader = self.reader()?;
         reader.busy_timeout(Duration::from_secs(2))?;
         reader.pragma_update(None, "query_only", true)?;
         let snapshot = reader.transaction()?;

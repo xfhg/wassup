@@ -227,7 +227,7 @@ fn create_key(entry: &keyring_core::Entry) -> Result<Zeroizing<[u8; 32]>> {
     Ok(key)
 }
 
-fn key_literal(key: &[u8; 32]) -> Zeroizing<String> {
+pub(crate) fn key_literal(key: &[u8; 32]) -> Zeroizing<String> {
     use std::fmt::Write;
     let mut literal = Zeroizing::new(String::with_capacity(67));
     literal.push_str("x'");
@@ -251,7 +251,7 @@ pub(super) fn read_only(path: &Path, key: &[u8; 32]) -> Result<Connection> {
 }
 
 /// Applies the supplied SQLCipher key and verifies a page before allowing archive access.
-fn unlock(connection: Connection, key: &[u8; 32]) -> Result<Connection> {
+pub(crate) fn unlock(connection: Connection, key: &[u8; 32]) -> Result<Connection> {
     connection.pragma_update(None, "key", &*key_literal(key))?;
     let version: String = connection
         .query_row("PRAGMA cipher_version", [], |row| row.get(0))

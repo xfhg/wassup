@@ -606,6 +606,15 @@ fn thread(
                 header.response.rect.bottom(),
                 egui::Stroke::new(1.0, palette.outline),
             );
+            if app.capture_export.is_some() {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Exporting plaintext…");
+                    if ui.small_button("Cancel export").clicked() {
+                        actions.push(Action::CancelCaptureExport);
+                    }
+                });
+            }
             egui::ScrollArea::vertical()
                 .id_salt(("deleted-thread", app.account().id.as_str(), &group.key))
                 .auto_shrink([false, false])
@@ -639,7 +648,14 @@ fn thread(
                                     previous_chat = Some(&row.canonical_chat);
                                 }
                                 ui.push_id((row.saved.sequence, "retained-message"), |ui| {
-                                    message_bubble(ui, &palette, app.locale, row, actions);
+                                    message_bubble(
+                                        ui,
+                                        &palette,
+                                        app.locale,
+                                        row,
+                                        app.capture_export.is_some(),
+                                        actions,
+                                    );
                                 });
                                 ui.add_space(7.0);
                             }
@@ -662,6 +678,7 @@ fn message_bubble(
     palette: &Palette,
     locale: Locale,
     row: &DeletedMessage,
+    exporting: bool,
     actions: &mut Vec<Action>,
 ) {
     let available = ui.available_width();
@@ -751,6 +768,7 @@ fn message_bubble(
                             palette,
                             &row.canonical_chat,
                             &row.saved.attachments,
+                            exporting,
                             actions,
                         );
                         for observation in &row.saved.history {
@@ -761,6 +779,7 @@ fn message_bubble(
                                 locale,
                                 &row.canonical_chat,
                                 observation,
+                                exporting,
                                 actions,
                             );
                         }
@@ -768,14 +787,21 @@ fn message_bubble(
                             small(
                                 ui,
                                 palette,
-                                "More history is available in the saved transcript.",
+                                "Export the transcript to include the complete history.",
                             );
                         }
                         ui.add_space(8.0);
-                        if ui.small_button("Open saved transcript").clicked() {
-                            actions.push(Action::OpenSavedFile {
-                                chat: row.canonical_chat.clone(),
-                                path: row.saved.markdown_path.clone(),
+                        small(
+                            ui,
+                            palette,
+                            "Exports are plaintext files in a folder you choose.",
+                        );
+                        if ui
+                            .add_enabled(!exporting, egui::Button::new("Export transcript").small())
+                            .clicked()
+                        {
+                            actions.push(Action::ExportCapture {
+                                chat: Some(row.canonical_chat.clone()),
                             });
                         }
                     });
@@ -807,6 +833,7 @@ fn observation_row(
     locale: Locale,
     chat: &str,
     observation: &SavedObservation,
+    exporting: bool,
     actions: &mut Vec<Action>,
 ) {
     small(
@@ -821,7 +848,14 @@ fn observation_row(
     if !observation.text.is_empty() {
         body(ui, palette, &observation.text);
     }
-    attachments(ui, palette, chat, &observation.attachments, actions);
+    attachments(
+        ui,
+        palette,
+        chat,
+        &observation.attachments,
+        exporting,
+        actions,
+    );
 }
 
 fn attachments(
@@ -829,18 +863,22 @@ fn attachments(
     palette: &Palette,
     chat: &str,
     attachments: &[SavedAttachment],
+    exporting: bool,
     actions: &mut Vec<Action>,
 ) {
     for (index, attachment) in attachments.iter().enumerate() {
         ui.add_space(5.0);
         if let Some(path) = &attachment.path {
             let label = if attachments.len() > 1 {
-                format!("Open attachment {}", index + 1)
+                format!("Save attachment {}", index + 1)
             } else {
-                "Open attachment".to_owned()
+                "Save attachment".to_owned()
             };
-            if ui.small_button(label).clicked() {
-                actions.push(Action::OpenSavedFile {
+            if ui
+                .add_enabled(!exporting, egui::Button::new(label).small())
+                .clicked()
+            {
+                actions.push(Action::ExportSavedAttachment {
                     chat: chat.to_owned(),
                     path: path.clone(),
                 });

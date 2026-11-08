@@ -803,17 +803,8 @@ fn sections(app: &App) -> Vec<Section> {
                 "Waiting for connection"
             };
             format!(
-                "{connection}. Last saved: {last}. Attachments: {} queued, {} downloading, {} saved, {} failed, {} oversized.{}",
-                status.queued,
-                status.downloading,
-                status.saved,
-                status.failed,
-                status.oversized,
-                status
-                    .markdown_error
-                    .as_deref()
-                    .map(|error| format!(" Readable files need attention: {error}"))
-                    .unwrap_or_default()
+                "{connection}. Last saved: {last}. Attachments: {} queued, {} downloading, {} saved, {} failed, {} oversized. Encrypted at rest. Exports are plaintext and include only known, unlocked chats.",
+                status.queued, status.downloading, status.saved, status.failed, status.oversized,
             )
         }
         None => {
@@ -821,19 +812,57 @@ fn sections(app: &App) -> Vec<Section> {
                 .into()
         }
     };
-    files.row("Permanent archive", description, move |ui, app| {
-        if theme::soft_button(
-            ui,
-            &palette,
-            Some(Icon::ExternalLink),
-            "Open archive",
-            false,
-        )
-        .clicked()
-        {
-            app.actions.push(Action::OpenFolder(root));
-        }
-    });
+    files.block(
+        vec![
+            "Permanent archive".into(),
+            description.clone().into(),
+            "Export archive".into(),
+        ],
+        move |ui, app| {
+            theme::text(ui, "Permanent archive", theme::medium(14.0), palette.text);
+            ui.add_space(4.0);
+            theme::paragraph(ui, &description, theme::regular(13.0), palette.secondary);
+            ui.add_space(12.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                if app.capture_export.is_some() {
+                    ui.spinner();
+                    ui.label("Exporting plaintext…");
+                    if ui.small_button("Cancel export").clicked() {
+                        app.actions.push(Action::CancelCaptureExport);
+                    }
+                } else if ui
+                    .add_enabled_ui(
+                        capture.as_ref().is_some_and(|status| !status.paused),
+                        |ui| {
+                            theme::soft_button(
+                                ui,
+                                &palette,
+                                Some(Icon::Download),
+                                "Export archive…",
+                                false,
+                            )
+                        },
+                    )
+                    .inner
+                    .clicked()
+                {
+                    app.actions.push(Action::ExportCapture { chat: None });
+                }
+                if theme::soft_button(
+                    ui,
+                    &palette,
+                    Some(Icon::ExternalLink),
+                    "Show archive folder",
+                    false,
+                )
+                .clicked()
+                {
+                    app.actions.push(Action::OpenFolder(root));
+                }
+            });
+        },
+    );
     // The account on screen: each number keeps its own archive and media.
     let state = app.account().dirs.state.clone();
     let open_folder = crate::i18n::gettext(locale, "Open folder");

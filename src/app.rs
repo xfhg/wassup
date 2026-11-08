@@ -3658,6 +3658,36 @@ impl App {
     fn apply_backend_event(&mut self, event: Event, live: bool) {
         match event {
             Event::CaptureStatus(status) => self.capture_status = Some(status),
+            Event::CaptureExportFinished { request, result } => {
+                if self.capture_export != Some(request) {
+                    return;
+                }
+                self.capture_export = None;
+                let account = self.account().display_label(self.locale);
+                match result {
+                    Ok(Some(path)) => self.toast(format!(
+                        "Plaintext export saved for {account}: {}",
+                        path.display()
+                    )),
+                    Ok(None) => {}
+                    Err(error) => self.toast_error(format!("{account}: {error}")),
+                }
+            }
+            Event::DeletedUnavailable => {
+                self.deleted_messages.clear();
+                self.deleted_query.clear();
+                self.deleted_selected_sender = None;
+                self.deleted_show_thread = false;
+                self.deleted_request = self.deleted_request.wrapping_add(1);
+                self.deleted_loading = false;
+                self.deleted_has_more = false;
+                self.deleted_cursor = None;
+                self.deleted_paged = false;
+                self.deleted_append = false;
+                self.deleted_preserve = false;
+                self.deleted_error = Some("Waiting for confirmed chat privacy settings".into());
+                self.deleted_refresh_due = Some(Instant::now() + Duration::from_secs(5));
+            }
             Event::DeletedLoaded {
                 request,
                 messages,
@@ -3667,6 +3697,10 @@ impl App {
                 if request != self.deleted_request {
                     return;
                 }
+                // A bounded worker scan can contain no deletions while older
+                // originals remain. Continue automatically, without making the
+                // person page through ordinary messages to find retained ones.
+                let continue_scan = error.is_none() && messages.is_empty() && next_before.is_some();
                 self.deleted_loading = false;
                 self.deleted_error = error;
                 if self.deleted_error.is_some() {
@@ -3700,6 +3734,17 @@ impl App {
                 self.deleted_cursor = next_before;
                 self.deleted_has_more = self.deleted_cursor.is_some();
                 self.deleted_refresh_due = Some(Instant::now() + Duration::from_secs(5));
+                if continue_scan {
+                    self.deleted_request = self.deleted_request.wrapping_add(1);
+                    self.deleted_loading = true;
+                    // Keep the original refresh/append mode and selected sender
+                    // across internal scan batches. Only Load more pauses the
+                    // normal background refresh after the scan finishes.
+                    self.backend.send(Command::LoadDeleted {
+                        request: self.deleted_request,
+                        before: next_before,
+                    });
+                }
             }
             Event::StorageStats {
                 stats,
@@ -7109,6 +7154,34 @@ impl App {
         self.settings_dirty = true;
     }
 
+    /// Request a plaintext export only from this account's known unlocked chats.
+    fn begin_capture_export(&mut self, selection: crate::backend::CaptureExportSelection) {
+        if self.capture_export.is_some() {
+            return;
+        }
+        let chats = match &selection {
+            crate::backend::CaptureExportSelection::Chats(chats) => chats.as_slice(),
+            crate::backend::CaptureExportSelection::Attachment { chat, .. } => {
+                std::slice::from_ref(chat)
+            }
+        };
+        if self.app_lock.is_locked()
+            || chats.is_empty()
+            || chats
+                .iter()
+                .any(|chat| !self.chat(chat).is_some_and(|chat| !chat.locked))
+        {
+            self.toast_error("Only known, unlocked chats can be exported");
+            return;
+        }
+        self.sync_chat_export_permission();
+        self.chat_export_sequence = self.chat_export_sequence.wrapping_add(1);
+        let request = self.chat_export_sequence;
+        self.capture_export = Some(request);
+        self.backend
+            .send(Command::ExportCapture { request, selection });
+    }
+
     /// A lock cancels exports for every account, including those off screen.
     fn sync_chat_export_permission(&mut self) {
         let allowed = !self.app_lock.is_locked();
@@ -8071,18 +8144,25 @@ impl App {
                     preview.show_album_item(path, item.id.clone(), item.card);
                 }
             }
-            Action::OpenSavedFile { chat, path } => {
-                let allowed = self.chat(&chat).is_some_and(|chat| !chat.locked)
-                    && self.capture_status.as_ref().is_some_and(|status| {
-                        path.canonicalize()
-                            .is_ok_and(|actual| actual.starts_with(&status.root))
-                    });
-                if allowed {
-                    self.apply(Action::OpenFile(path), ctx);
-                } else {
-                    self.toast_error("The saved file is unavailable or this chat is locked");
-                }
+            Action::ExportCapture { chat } => {
+                let chats = match chat {
+                    Some(chat) => vec![chat],
+                    None => self
+                        .chats
+                        .iter()
+                        .filter(|chat| !chat.locked)
+                        .map(|chat| chat.id.clone())
+                        .collect(),
+                };
+                self.begin_capture_export(crate::backend::CaptureExportSelection::Chats(chats));
             }
+            Action::ExportSavedAttachment { chat, path } => {
+                self.begin_capture_export(crate::backend::CaptureExportSelection::Attachment {
+                    chat,
+                    path,
+                })
+            }
+            Action::CancelCaptureExport => self.backend.send(Command::CancelCaptureExport),
             Action::OpenFile(path) => {
                 let allowed = crate::safety::can_open_attachment(&path);
                 if allowed && matches!(path.try_exists(), Ok(false)) {
@@ -10469,7 +10549,7 @@ impl App {
     /// Read-only archive navigation. Requests are scoped to this account and
     /// invalidated on unlink; older replies cannot replace a newer page.
     fn request_deleted(&mut self, more: bool) {
-        self.request_deleted_mode(more, false);
+        self.request_deleted_mode(more, !more);
     }
 
     fn request_deleted_mode(&mut self, more: bool, preserve: bool) {
@@ -12953,6 +13033,148 @@ mod tests {
     }
 
     #[test]
+    fn manual_refresh_and_reopening_deleted_keep_the_selected_sender() {
+        for action in [Action::RefreshDeleted, Action::Open(Page::Deleted)] {
+            let mut app = app();
+            app.deleted_messages = vec![deleted_fixture(3), deleted_fixture(2)];
+            app.deleted_selected_sender = Some("fixture@s.whatsapp.net".into());
+            app.apply(action, &egui::Context::default());
+            app.apply_backend_event(
+                Event::DeletedLoaded {
+                    request: app.deleted_request,
+                    messages: vec![deleted_fixture(105)],
+                    next_before: Some(104),
+                    error: None,
+                },
+                true,
+            );
+            assert_eq!(
+                app.deleted_messages
+                    .iter()
+                    .map(|row| row.saved.sequence)
+                    .collect::<Vec<_>>(),
+                vec![105, 3, 2]
+            );
+            assert_eq!(
+                app.deleted_selected_sender.as_deref(),
+                Some("fixture@s.whatsapp.net")
+            );
+        }
+    }
+
+    #[test]
+    fn deleted_refresh_skips_empty_scan_batches_without_user_pagination() {
+        let mut app = app();
+        app.request_deleted(false);
+        for boundary in [200, 100] {
+            let request = app.deleted_request;
+            app.apply_backend_event(
+                Event::DeletedLoaded {
+                    request,
+                    messages: Vec::new(),
+                    next_before: Some(boundary),
+                    error: None,
+                },
+                true,
+            );
+            assert!(app.deleted_loading);
+            assert!(
+                !app.deleted_paged,
+                "internal scanning must not pause refresh"
+            );
+            assert_ne!(app.deleted_request, request);
+            assert_eq!(app.deleted_cursor, Some(boundary));
+        }
+        app.apply_backend_event(
+            Event::DeletedLoaded {
+                request: app.deleted_request,
+                messages: vec![deleted_fixture(3)],
+                next_before: None,
+                error: None,
+            },
+            true,
+        );
+        assert_eq!(app.deleted_messages.len(), 1);
+        assert!(!app.deleted_loading && !app.deleted_has_more && !app.deleted_paged);
+    }
+
+    #[test]
+    fn deleted_empty_continuations_preserve_selection_and_stop_at_archive_end() {
+        let mut app = app();
+        app.deleted_messages = vec![deleted_fixture(3)];
+        app.deleted_selected_sender = Some("fixture@s.whatsapp.net".into());
+        app.request_deleted(false);
+        app.apply_backend_event(
+            Event::DeletedLoaded {
+                request: app.deleted_request,
+                messages: Vec::new(),
+                next_before: Some(100),
+                error: None,
+            },
+            true,
+        );
+        assert!(app.deleted_loading);
+        assert_eq!(app.deleted_messages.len(), 1);
+        assert_eq!(
+            app.deleted_selected_sender.as_deref(),
+            Some("fixture@s.whatsapp.net")
+        );
+        // Exhaustion revalidates and removes rows that no longer qualify.
+        let request = app.deleted_request;
+        app.apply_backend_event(
+            Event::DeletedLoaded {
+                request,
+                messages: Vec::new(),
+                next_before: None,
+                error: None,
+            },
+            true,
+        );
+        assert!(app.deleted_messages.is_empty());
+        assert!(!app.deleted_loading && !app.deleted_has_more);
+        assert_eq!(
+            app.deleted_request, request,
+            "exhaustion must stop scanning"
+        );
+    }
+
+    #[test]
+    fn deleted_load_more_skips_empty_batches_without_replacing_loaded_rows() {
+        let mut app = app();
+        app.deleted_messages = vec![deleted_fixture(300)];
+        app.deleted_has_more = true;
+        app.deleted_cursor = Some(300);
+        app.request_deleted(true);
+        app.apply_backend_event(
+            Event::DeletedLoaded {
+                request: app.deleted_request,
+                messages: Vec::new(),
+                next_before: Some(100),
+                error: None,
+            },
+            true,
+        );
+        assert!(app.deleted_loading && app.deleted_paged && app.deleted_append);
+        app.apply_backend_event(
+            Event::DeletedLoaded {
+                request: app.deleted_request,
+                messages: vec![deleted_fixture(3)],
+                next_before: None,
+                error: None,
+            },
+            true,
+        );
+        assert_eq!(
+            app.deleted_messages
+                .iter()
+                .map(|row| row.saved.sequence)
+                .collect::<Vec<_>>(),
+            vec![300, 3]
+        );
+        assert!(!app.deleted_loading && !app.deleted_has_more);
+    }
+
+    #[test]
     fn unlink_invalidates_deleted_page_and_in_flight_results() {
         let mut app = app();
         app.request_deleted(false);
@@ -12990,6 +13212,45 @@ mod tests {
         assert!(app.deleted_messages.is_empty());
         assert!(app.deleted_error.is_some());
         assert!(!app.deleted_loading);
+    }
+
+    #[test]
+    fn failed_privacy_writes_clear_cached_deleted_rows_and_invalidate_late_replies() {
+        let mut app = app();
+        app.request_deleted(false);
+        let request = app.deleted_request;
+        app.deleted_messages.push(deleted_fixture(1));
+        app.deleted_query = "retained search".into();
+        app.deleted_selected_sender = Some("fixture@s.whatsapp.net".into());
+        app.deleted_show_thread = true;
+        app.deleted_cursor = Some(50);
+        app.deleted_has_more = true;
+        app.deleted_paged = true;
+        app.apply_backend_event(Event::DeletedUnavailable, true);
+        assert!(app.deleted_messages.is_empty());
+        assert!(app.deleted_query.is_empty());
+        assert!(app.deleted_selected_sender.is_none());
+        assert!(!app.deleted_show_thread);
+        assert!(app.deleted_cursor.is_none());
+        assert!(!app.deleted_loading && !app.deleted_has_more && !app.deleted_paged);
+        assert!(app.deleted_error.is_some());
+        assert!(
+            app.deleted_refresh_due.is_some(),
+            "recovery retries automatically"
+        );
+        app.apply_backend_event(
+            Event::DeletedLoaded {
+                request,
+                messages: vec![deleted_fixture(1)],
+                next_before: Some(50),
+                error: None,
+            },
+            true,
+        );
+        assert!(
+            app.deleted_messages.is_empty(),
+            "a stale result cannot reveal content"
+        );
     }
 
     #[test]
@@ -14876,6 +15137,66 @@ mod tests {
         assert!(app.gif_requested.is_empty());
         assert!(!app.gif_pending);
         assert!(app.gif_error.is_none());
+    }
+
+    /// Export state follows its account and ignores progress from an older request.
+    #[test]
+    fn permanent_archive_exports_filter_locks_and_keep_account_local_outcomes() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = two_accounts(directory.path());
+        app.active = 1;
+        app.me_name = Some("Export account".into());
+        app.chats.push(Chat::new("open".into(), "Open chat".into()));
+        let mut locked = Chat::new("locked".into(), "Locked chat".into());
+        locked.locked = true;
+        app.chats.push(locked);
+        let ctx = egui::Context::default();
+        app.apply(
+            Action::ExportCapture {
+                chat: Some("locked".into()),
+            },
+            &ctx,
+        );
+        assert!(commands.try_recv().is_err());
+        app.apply(Action::ExportCapture { chat: None }, &ctx);
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            Command::SetChatExportAllowed(true)
+        ));
+        let request = match commands.try_recv().unwrap() {
+            Command::ExportCapture {
+                request,
+                selection: crate::backend::CaptureExportSelection::Chats(chats),
+            } => {
+                assert_eq!(chats, ["open"]);
+                request
+            }
+            _ => panic!("expected the explicit export request"),
+        };
+        assert!(app.accounts[0].capture_export.is_none());
+        app.apply_backend_event(
+            Event::CaptureExportFinished {
+                request: request.wrapping_add(1),
+                result: Ok(None),
+            },
+            false,
+        );
+        assert_eq!(app.capture_export, Some(request));
+        app.apply_backend_event(
+            Event::CaptureExportFinished {
+                request,
+                result: Ok(Some(directory.path().join("chosen-export"))),
+            },
+            false,
+        );
+        assert!(app.capture_export.is_none());
+        assert!(
+            app.toasts
+                .last()
+                .unwrap()
+                .message
+                .starts_with("Plaintext export saved for Export account:")
+        );
     }
 
     /// Export state follows its account and ignores progress from an older request.

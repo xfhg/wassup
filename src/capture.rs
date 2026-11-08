@@ -1,18 +1,20 @@
 //! Independent, append-only message capture for Wassup.
 //!
 //! The protocol durability hook commits the complete batch before allowing an
-//! acknowledgement. Markdown is a rebuildable view, never the durable boundary.
+//! acknowledgement. Readable copies are created only by an explicit export.
 
+mod export;
 pub mod media;
+mod media_store;
+mod storage;
 #[cfg(test)]
 mod tests;
 pub mod view;
 
-use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -66,8 +68,7 @@ struct Inner {
     root: PathBuf,
     connection: Mutex<Connection>,
     status: Mutex<CaptureStatus>,
-    rendering: Mutex<()>,
-    render: mpsc::SyncSender<()>,
+    key: storage::Key,
 }
 
 #[derive(Clone)]
@@ -99,16 +100,16 @@ impl Capture {
         let root = accounts.join(hex_digest(account.as_bytes()));
         private_dir(&root)?;
         private_dir(&root.join("media"))?;
-        private_dir(&root.join("chats"))?;
+
         let db = root.join("journal.sqlite3");
         reject_symlink(&db)?;
         // NOFOLLOW closes the check/open race for the database itself.
-        let mut connection = Connection::open_with_flags(
-            &db,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
-                | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
-                | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
+        let namespace = root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("Invalid capture namespace")?;
+        let key = storage::key_for(&root, namespace)?;
+        let mut connection = storage::open(&db, &key)?;
         private_file(&db)?;
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.execute_batch(
@@ -161,7 +162,6 @@ impl Capture {
             }
         }
         sync_directory(&root)?;
-        let (render, receiver) = mpsc::sync_channel(1);
         let capture = Arc::new(Self {
             inner: Arc::new(Inner {
                 root: root.clone(),
@@ -170,32 +170,17 @@ impl Capture {
                     root,
                     ..Default::default()
                 }),
-                rendering: Mutex::new(()),
-                render,
+                key,
             }),
         });
         capture.refresh_status()?;
-        let weak = Arc::downgrade(&capture.inner);
-        std::thread::Builder::new()
-            .name("wassup-archive-view".to_owned())
-            .spawn(move || {
-                loop {
-                    match receiver.recv_timeout(Duration::from_secs(5)) {
-                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                        Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    }
-                    let Some(inner) = weak.upgrade() else { break };
-                    let capture = Self { inner };
-                    let result = capture.render_pending();
-                    if let Ok(mut status) = capture.inner.status.lock() {
-                        status.markdown_error = result.err().map(|_| {
-                            "Readable files need regeneration; the journal remains saved."
-                                .to_owned()
-                        });
-                    }
-                }
-            })?;
-        let _ = capture.inner.render.try_send(());
+        // Fail closed until every pre-existing attachment has been encrypted.
+        // The journal migration is independently durable and can be resumed.
+        media::migrate_existing(&capture)?;
+        capture.retire_legacy_markdown()?;
+        if let Some(root) = capture.root().parent().and_then(Path::parent) {
+            write_archive_readme(root)?;
+        }
         Ok(capture)
     }
 
@@ -300,10 +285,9 @@ impl Capture {
             status.paused = false;
             status.error = None;
         }
-        // A status/readable-view failure must not turn a durable commit into an
-        // unacknowledged batch. Both projections can be rebuilt from the journal.
+        // A status refresh failure must not turn a durable commit into an
+        // unacknowledged batch. The journal is already committed.
         let _ = self.refresh_status();
-        let _ = self.inner.render.try_send(());
         Ok(())
     }
 
@@ -349,7 +333,6 @@ impl Capture {
         tx.commit()?;
         drop(connection);
         self.refresh_status()?;
-        let _ = self.inner.render.try_send(());
         Ok(job)
     }
 
@@ -394,7 +377,6 @@ impl Capture {
             snapshot.paused = false;
             snapshot.error = None;
         }
-        let _ = self.inner.render.try_send(());
         Ok(())
     }
 
@@ -437,155 +419,116 @@ impl Capture {
         Ok(())
     }
 
-    /// Public for deterministic synthetic tests and explicit repair tooling.
-    /// Never call from a UI frame.
-    pub fn render_pending(&self) -> Result<()> {
-        let _rendering = self
+    pub(super) fn key(&self) -> &[u8; 32] {
+        &self.inner.key
+    }
+
+    pub(crate) fn reader(&self) -> Result<Connection> {
+        storage::read_only(&self.root().join("journal.sqlite3"), self.key())
+    }
+
+    /// Preserve prior generated exports inside the encrypted journal before
+    /// removing plaintext copies. This also protects any edits made to them.
+    fn retire_legacy_markdown(&self) -> Result<()> {
+        let mut connection = self
             .inner
-            .rendering
+            .connection
             .lock()
-            .map_err(|_| anyhow!("Capture renderer lock failed"))?;
-        // WAL readers do not hold the writer mutex while a large month is
-        // materialized. The receive hook only waits for its own transaction.
-        let reader = Connection::open_with_flags(
-            self.root().join("journal.sqlite3"),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            .map_err(|_| anyhow!("Capture lock failed"))?;
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS legacy_exports (
+            path TEXT NOT NULL, chunk INTEGER NOT NULL, bytes BLOB NOT NULL,
+            PRIMARY KEY(path,chunk));",
         )?;
-        reader.busy_timeout(Duration::from_secs(5))?;
-        if let Some(root) = self.root().parent().and_then(Path::parent) {
-            write_archive_readme(root)?;
+        let mut files = Vec::new();
+        let chats = self.root().join("chats");
+        if chats.exists() {
+            reject_symlink(&chats)?;
+            for entry in fs::read_dir(&chats)? {
+                let entry = entry?;
+                let name = entry.file_name();
+                let name = name.to_str().context("Invalid legacy export filename")?;
+                let valid = name.is_ascii()
+                    && name.len() == 75
+                    && name[..64].bytes().all(|c| c.is_ascii_hexdigit())
+                    && name.as_bytes()[64] == b'-'
+                    && name.ends_with(".md")
+                    && name[65..69].bytes().all(|c| c.is_ascii_digit())
+                    && name.as_bytes()[69] == b'-'
+                    && name[70..72].bytes().all(|c| c.is_ascii_digit());
+                if !valid || !entry.file_type()?.is_file() {
+                    bail!("Unexpected file in legacy chat exports; migration paused");
+                }
+                files.push(entry.path());
+            }
         }
-        let pages = {
-            let mut statement =
-                reader.prepare("SELECT chat,month,version FROM dirty_pages LIMIT 32")?;
-            statement
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        let rebuild_index = !pages.is_empty() || !self.root().join("index.md").exists();
-        for (chat, month, version) in pages {
-            let records = {
-                let mut statement=reader.prepare(
-                    "SELECT e.message_id,e.target_id,e.kind,e.text,e.sent_at,e.observed_at,e.sender,e.direction,e.source,
-                      m.status,m.path,m.error FROM events e LEFT JOIN media_jobs m ON m.event_sequence=e.sequence
-                      WHERE e.chat=?1 AND e.month=?2 ORDER BY e.sequence")?;
-                statement
-                    .query_map(params![chat, month], |row| {
-                        Ok(RenderRecord {
-                            message_id: row.get(0)?,
-                            target: row.get(1)?,
-                            kind: row.get(2)?,
-                            text: row.get(3)?,
-                            sent_at: row.get(4)?,
-                            observed_at: row.get(5)?,
-                            sender: row.get(6)?,
-                            direction: row.get(7)?,
-                            source: row.get(8)?,
-                            media_status: row.get(9)?,
-                            media_path: row.get(10)?,
-                            media_error: row.get(11)?,
-                        })
-                    })?
-                    .collect::<std::result::Result<Vec<_>, _>>()?
-            };
-            let mut markdown = format!(
-                "# {}\n\nMonth: {month} (UTC)\n\nOriginal observations are retained below. This file is generated from Wassup's journal.\n\n",
-                escape_markdown(&chat)
+        let index = self.root().join("index.md");
+        if index.exists() {
+            files.push(index);
+        }
+        for path in files {
+            reject_symlink(&path)?;
+            let relative = path.strip_prefix(self.root())?.to_string_lossy();
+            let mut input = fs::File::open(&path)?;
+            let original_metadata = input.metadata()?;
+            let tx = connection.transaction()?;
+            // Re-running after a crash replaces only this encrypted backup.
+            tx.execute("DELETE FROM legacy_exports WHERE path=?1", [&*relative])?;
+            let mut buffer = [0u8; 64 * 1024];
+            let mut chunk = 0_i64;
+            let mut digest = Sha256::new();
+            loop {
+                use std::io::Read;
+                let len = input.read(&mut buffer)?;
+                if len == 0 {
+                    break;
+                }
+                digest.update(&buffer[..len]);
+                tx.execute(
+                    "INSERT INTO legacy_exports(path,chunk,bytes) VALUES(?1,?2,?3)",
+                    params![&*relative, chunk, &buffer[..len]],
+                )?;
+                chunk += 1;
+            }
+            tx.commit()?;
+            let mut verified = Sha256::new();
+            let mut statement = connection
+                .prepare("SELECT bytes FROM legacy_exports WHERE path=?1 ORDER BY chunk")?;
+            for bytes in statement.query_map([&*relative], |row| row.get::<_, Vec<u8>>(0))? {
+                verified.update(bytes?);
+            }
+            let expected = digest.finalize();
+            anyhow::ensure!(
+                expected == verified.finalize(),
+                "Legacy export verification failed"
             );
-            let pending_ids = records
-                .iter()
-                .filter(|record| record.kind == "outgoing_pending")
-                .map(|record| record.message_id.clone())
-                .collect::<HashSet<_>>();
-            let mut own_messages = HashSet::new();
-            for record in records {
-                // An echo proves observation but should not print our original
-                // text twice. Edits are never collapsed by their text.
-                if record.direction == "outgoing"
-                    && matches!(record.kind.as_str(), "message" | "outgoing_pending")
-                {
-                    if record.kind == "message" && pending_ids.contains(&record.message_id) {
-                        continue;
-                    }
-                    if !own_messages.insert(record.message_id.clone()) {
-                        continue;
-                    }
+            reject_symlink(&path)?;
+            let current_metadata = fs::metadata(&path)?;
+            anyhow::ensure!(
+                original_metadata.len() == current_metadata.len()
+                    && original_metadata.modified()? == current_metadata.modified()?,
+                "A legacy transcript changed during migration; retry after closing its editor"
+            );
+            let mut current = fs::File::open(&path)?;
+            let mut current_digest = Sha256::new();
+            loop {
+                use std::io::Read;
+                let len = current.read(&mut buffer)?;
+                if len == 0 {
+                    break;
                 }
-                markdown.push_str(&format!(
-                    "## {} | {}\n\n",
-                    stamp(record.sent_at),
-                    escape_markdown(&record.kind)
-                ));
-                markdown.push_str(&format!(
-                    "Sender: {}  \nMessage: {}  \nReceived: {}  \nSource: {}\n\n",
-                    escape_markdown(&record.sender),
-                    escape_markdown(&record.message_id),
-                    stamp(record.observed_at),
-                    escape_markdown(&record.source)
-                ));
-                if let Some(target) = record.target {
-                    markdown.push_str(&format!("Target message: {}\n\n", escape_markdown(&target)));
-                }
-                for line in record.text.split('\n') {
-                    markdown.push_str(&format!("> {}\n", escape_markdown(line)));
-                }
-                markdown.push('\n');
-                if let Some(state) = record.media_status {
-                    markdown.push_str(&format!("Attachment: **{}**", escape_markdown(&state)));
-                    if let Some(path) = record.media_path {
-                        markdown
-                            .push_str(&format!(" [Open file](../{})", path.replace(' ', "%20")));
-                    }
-                    if let Some(error) = record.media_error {
-                        markdown.push_str(&format!(" ({})", escape_markdown(&error)));
-                    }
-                    markdown.push_str("\n\n");
-                }
-                markdown.push_str("---\n\n");
+                current_digest.update(&buffer[..len]);
             }
-            let file = self
-                .root()
-                .join("chats")
-                .join(format!("{}-{month}.md", hex_digest(chat.as_bytes())));
-            atomic_write(&file, markdown.as_bytes())?;
-            let connection = self
-                .inner
-                .connection
-                .lock()
-                .map_err(|_| anyhow!("Capture lock failed"))?;
-            connection.execute(
-                "DELETE FROM dirty_pages WHERE chat=?1 AND month=?2 AND version<=?3",
-                params![chat, month, version],
-            )?;
+            anyhow::ensure!(
+                expected == current_digest.finalize(),
+                "A legacy transcript changed during migration"
+            );
+            fs::remove_file(&path)?;
+            sync_directory(path.parent().context("Missing legacy export directory")?)?;
         }
-        if rebuild_index {
-            let mut statement = reader
-                .prepare("SELECT DISTINCT chat,month FROM events ORDER BY chat,month DESC")?;
-            let pages = statement
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            let mut index = "# Wassup chat archive\n\nSelect a conversation and month. Chat identifiers are the original WhatsApp addresses. All times use UTC.\n\n".to_owned();
-            for (chat, month) in pages {
-                index.push_str(&format!(
-                    "- [{} · {}](chats/{}-{}.md)\n",
-                    escape_markdown(&chat),
-                    month,
-                    hex_digest(chat.as_bytes()),
-                    month
-                ));
-            }
-            if index.ends_with("\n\n") {
-                index.push_str("No messages have been captured for this account yet.\n");
-            }
-            atomic_write(&self.root().join("index.md"), index.as_bytes())?;
+        if chats.exists() {
+            fs::remove_dir(&chats)?;
+            sync_directory(self.root())?;
         }
         Ok(())
     }
@@ -918,22 +861,10 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 fn write_archive_readme(root: &Path) -> Result<()> {
-    let path = root.join("WASSUP-README.md");
-    reject_symlink(&path)?;
-    if path.exists() {
-        return Ok(());
-    }
-    let text = "# Wassup archive\n\nThis folder contains independent, permanent local copies of captured WhatsApp messages.\n\n## Read your chats\n\nOpen `accounts`, choose an account folder, then open its `index.md`. The index lists chat identifiers and months. Folder identifiers keep linked accounts separate; a fresh link after unlinking creates a new folder.\n\nEach chat file shows original text, later edits, deletion notices, and links to saved attachments. Pending or failed attachments are marked explicitly. Files are readable plaintext and are restricted to your macOS user.\n\n## What is saved\n\n`journal.sqlite3` is the durable source. Markdown is a generated view; editing Markdown does not change the journal and generated updates replace those edits. Wassup retries failed readable-file generation while it runs. `media` contains permanent attachment copies.\n\nDeleting a message or clearing a chat in WhatsApp does not remove these copies. Capture requires Wassup to be running and connected. Content deleted before receipt and unfinished downloads may be unavailable.\n\n## Backup\n\nQuit Wassup before copying this entire folder, including database sidecar files if present. Keep the backup private. Do not remove individual database journal files while Wassup is running.\n";
-    let mut temporary = tempfile::NamedTempFile::new_in(root)?;
-    private_file(temporary.path())?;
-    temporary.write_all(text.as_bytes())?;
-    temporary.as_file().sync_all()?;
-    match temporary.persist_noclobber(&path) {
-        Ok(_) => sync_directory(root),
-        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-        Err(error) => Err(error.into()),
-    }
+    let text = "# Wassup encrypted archive\n\nMessages and attachments in this folder are encrypted. Wassup unlocks them with a separate permanent-archive key in the macOS Keychain. Read deleted messages inside Wassup. Use Export transcript, Save attachment, or Export archive when you want a readable copy outside the app. Exports are unencrypted.\n\nBack up this entire folder with Wassup closed. Preserve the matching Keychain keys: copying this folder alone is not enough to recover it on another Mac. Removing an account from Wassup does not delete its permanent archive or key. Do not remove database sidecar files while Wassup is running.\n";
+    atomic_write(&root.join("WASSUP-README.md"), text.as_bytes())
 }
+
 fn sync_directory(path: &Path) -> Result<()> {
     #[cfg(unix)]
     fs::File::open(path)?.sync_all()?;
