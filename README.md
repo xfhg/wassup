@@ -4,15 +4,13 @@
 
 <h1 align="center">Wassup</h1>
 
-A native WhatsApp client for macOS, written in Rust, that preserves deleted
-messages. Based on [ZapFast](https://github.com/crmne/zapfast) 0.21.1.
+A native WhatsApp client for macOS, written in Rust, that preserves remotely deleted
+messages. 
 
-- **Deleted messages:** read retained originals in the app, grouped by sender.
+- **Deleted messages:** browse by chat or sender, with surrounding context and
+  visible revisions. Export a chat's deletions and context from its header.
 - **Encrypted archive:** messages, revisions, and attachments in `~/Wassup`,
   unlocked automatically through macOS Keychain.
-- **Export on request:** save readable transcripts or attachments when needed.
-  Exports are plaintext.
-- **Independent profile:** separate WhatsApp pairing; runs after the window closes.
 
 ## Limits
 
@@ -36,3 +34,4 @@ scripts/build-wassup-macos.sh
 Creates `dist/Wassup.app`. Install and launch it manually.
 
 MIT licensed. See [LICENSE](LICENSE) and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+Based on [ZapFast](https://github.com/crmne/zapfast).
